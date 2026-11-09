@@ -2319,6 +2319,35 @@ task.spawn(function()
     end
 end)
 
+-- FIX: applique les mods automatiquement + Auto Reload (avant, seul "Apply Now" le faisait)
+task.spawn(function()
+    local lastReloadKey = 0
+    while Alive() do
+        task.wait(0.15)
+        if not Alive() then break end
+        if not Busy then
+            ForEachGun(function(t) pcall(ApplyMods, t) end, true)
+
+            if AutoReload and ModsEnabled and not MenuOpen then
+                local char = LocalPlayer.Character
+                if char then
+                    for _, t in ipairs(char:GetChildren()) do
+                        if t:IsA("Tool") and GunSettings[t.Name] then
+                            local ammo = tonumber(GetAttr(t, "Local_CurrentAmmo"))
+                            local reloading = tostring(GetAttr(t, "IsReloading")) == "true"
+                            if ammo and ammo <= 0 and not reloading and os.clock() - lastReloadKey > ReloadDelay then
+                                pcall(keyclick, "r")
+                                lastReloadKey = os.clock()
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
 pcall(function()
     game.Players.PlayerAdded:Connect(function()
         task.delay(0.5, function() if Alive() then RefreshPlayers() end end)
@@ -2333,8 +2362,6 @@ end)
 
 -- ===================== MISC =====================
 local function BuildMisc()
-    local RunService = game:GetService("RunService")
-
     local Tab = MiscTab
     if not Tab then
         local W = UI.Window({
@@ -2386,21 +2413,34 @@ local function BuildMisc()
     end)
 
     -- ---- Rainbow Mode ----
-    local rainbowConn = nil
-    local rainbowHue  = 0
+    local rainbowOn = false
+    local rainbowRunning = false
+    local rainbowHue = 0
 
     MiscGroup:Toggle("Rainbow Mode", false, function(state)
-        if rainbowConn then rainbowConn:Disconnect() rainbowConn = nil end
+        rainbowOn = state
         if state then
             Lumen.Notify("Rainbow Mode ON", 2)
-            rainbowConn = RunService.Heartbeat:Connect(function(dt)
-                rainbowHue = (rainbowHue + dt * 0.3) % 1
-                local color = Color3.fromHSV(rainbowHue, 1, 1)
-                for _, obj in ipairs(workspace:GetDescendants()) do
-                    if obj:IsA("BasePart") then
+            if rainbowRunning then return end
+            rainbowRunning = true
+            task.spawn(function()
+                local parts, lastScan = {}, 0
+                while rainbowOn and Alive() do
+                    if os.clock() - lastScan > 5 then
+                        parts = {}
+                        for _, obj in ipairs(workspace:GetDescendants()) do
+                            if obj:IsA("BasePart") then parts[#parts + 1] = obj end
+                        end
+                        lastScan = os.clock()
+                    end
+                    rainbowHue = (rainbowHue + 0.02) % 1
+                    local color = Color3.fromHSV(rainbowHue, 1, 1)
+                    for _, obj in ipairs(parts) do
                         pcall(function() obj.Color = color end)
                     end
+                    task.wait(0.25)
                 end
+                rainbowRunning = false
             end)
         else
             Lumen.Notify("Rainbow Mode OFF", 2)
@@ -2409,4 +2449,3 @@ local function BuildMisc()
 end
 
 BuildMisc()
-
