@@ -39,7 +39,6 @@ local ToolsTab = Window:Tab("Tools and Armors")
 local ModsTab = Window:Tab("Guns Moddings")
 local FunTab = Window:Tab("Fun")
 local MiscTab = Window:Tab("Misc")
-local SettingsTab = Window:Tab("Settings")
 
 local LocalPlayer = game.Players.LocalPlayer
 local PoliceArea = Vector3.new(828.171, 99.977, 2232.139)
