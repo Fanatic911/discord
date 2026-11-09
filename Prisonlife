@@ -2318,31 +2318,48 @@ task.spawn(function()
     end
 end)
 
--- FIX: applique les mods automatiquement + Auto Reload (avant, seul "Apply Now" le faisait)
+-- FIX: applique les mods automatiquement (aussi après la mort / respawn) + Auto Reload
+local function PruneOriginals()
+    for key, store in pairs(Originals) do
+        local ok, parent = pcall(function() return store.tool and store.tool.Parent end)
+        if not ok or parent == nil then
+            Originals[key] = nil
+        end
+    end
+end
+
 task.spawn(function()
     local lastReloadKey = 0
+    local lastPrune = 0
     while Alive() do
         task.wait(0.15)
         if not Alive() then break end
-        if not Busy then
-            ForEachGun(function(t) pcall(ApplyMods, t) end, true)
 
-            if AutoReload and ModsEnabled and not MenuOpen then
+        -- ne dépend plus de Busy et ne peut plus s'arrêter sur une erreur
+        pcall(function()
+            if os.clock() - lastPrune > 2 then
+                lastPrune = os.clock()
+                PruneOriginals()
+            end
+            ForEachGun(function(t) pcall(ApplyMods, t) end, true)
+        end)
+
+        if not Busy and AutoReload and ModsEnabled and not MenuOpen then
+            pcall(function()
                 local char = LocalPlayer.Character
-                if char then
-                    for _, t in ipairs(char:GetChildren()) do
-                        if t:IsA("Tool") and GunSettings[t.Name] then
-                            local ammo = tonumber(GetAttr(t, "Local_CurrentAmmo"))
-                            local reloading = tostring(GetAttr(t, "IsReloading")) == "true"
-                            if ammo and ammo <= 0 and not reloading and os.clock() - lastReloadKey > ReloadDelay then
-                                pcall(keyclick, "r")
-                                lastReloadKey = os.clock()
-                            end
-                            break
+                if not char then return end
+                for _, t in ipairs(char:GetChildren()) do
+                    if t:IsA("Tool") and GunSettings[t.Name] then
+                        local ammo = tonumber(GetAttr(t, "Local_CurrentAmmo"))
+                        local reloading = tostring(GetAttr(t, "IsReloading")) == "true"
+                        if ammo and ammo <= 0 and not reloading and os.clock() - lastReloadKey > ReloadDelay then
+                            pcall(keyclick, "r")
+                            lastReloadKey = os.clock()
                         end
+                        break
                     end
                 end
-            end
+            end)
         end
     end
 end)
