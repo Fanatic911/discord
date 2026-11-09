@@ -1,0 +1,2397 @@
+local Env = getgenv()
+Env.PrisonLifeGen = (Env.PrisonLifeGen or 0) + 1
+local Gen = Env.PrisonLifeGen
+
+local Boot = game.Players.LocalPlayer
+
+local function Alive()
+    if Env.PrisonLifeGen ~= Gen then return false end
+    local ok, parent = pcall(function() return Boot.Parent end)
+    return ok and parent ~= nil
+end
+
+local Window = UI.Window({
+    Title = "Prison Life",
+    Key = "prison_life_menu",
+    Width = 600,
+    Height = 560
+})
+
+Window:SetVisible(true)
+Window:BindToMenu(true)
+
+local TeleportTab = Window:Tab("Teleport")
+local GunsTab = Window:Tab("Guns")
+local ToolsTab = Window:Tab("Tools and Armors")
+local ModsTab = Window:Tab("Guns Moddings")
+local FunTab = Window:Tab("Fun")
+local MiscTab = Window:Tab("Misc")
+
+local LocalPlayer = game.Players.LocalPlayer
+local PoliceArea = Vector3.new(828.171, 99.977, 2232.139)
+local MP5Pos = CFrame.new(813.828, 100.940, 2229.233)
+local M700Pos = CFrame.new(835.722, 100.591, 2229.825)
+local M4A1Pos = CFrame.new(847.212, 100.591, 2229.724)
+
+local CrimRemingtonPos = CFrame.new(-939.186, 94.309, 2039.235)
+local CrimAK47Pos = CFrame.new(-931.987, 94.368, 2039.406)
+local CrimM700Pos = CFrame.new(-920.436, 94.529, 2037.455)
+local CrimRevolverPos = CFrame.new(-915.386, 94.129, 2039.311)
+local CrimFALPos = CFrame.new(-915.386, 94.129, 2039.311)
+
+local ArmorStandPos = Vector3.new(827.979, 99.977, 2233.439)
+local RiotShieldPos = CFrame.new(842.153, 99.977, 2233.450)
+local CrimArmorStandPos = Vector3.new(-903.008, 94.129, 2053.513)
+local C4StandPos = Vector3.new(-904.747, 94.129, 2042.721)
+
+local KnifeStandPos = Vector3.new(703.499, 98.000, 2503.526)
+local HammerStandPos = Vector3.new(806.497, 98.190, 2527.213)
+local LunchStandPos = Vector3.new(922.162, 99.990, 2248.673)
+
+local Timeout = 2
+local ClickTimeout = 6
+local SweepTimeout = 30
+local MenuDelay = 2
+local Debug = true
+local Busy = false
+local FirstPerson = false
+
+local function Log(...)
+    if Debug then print(...) end
+end
+
+local function GetRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function HasTool(name)
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    local char = LocalPlayer.Character
+    return (bp and bp:FindFirstChild(name) ~= nil)
+        or (char and char:FindFirstChild(name) ~= nil)
+        or false
+end
+
+local function CountTools(holder)
+    local n = 0
+    if holder then
+        for _, t in ipairs(holder:GetChildren()) do
+            if t:IsA("Tool") then n = n + 1 end
+        end
+    end
+    return n
+end
+
+local function ToolCount()
+    return CountTools(LocalPlayer:FindFirstChild("Backpack")) + CountTools(LocalPlayer.Character)
+end
+
+-- FIX: snapshot pris ICI, avant tout wait/déplacement
+local function NewItemCheck(name)
+    local before = ToolCount()
+    Log("[NewItemCheck] snapshot before =", before, "| name =", tostring(name))
+    return function()
+        local got = (name ~= nil and HasTool(name)) or ToolCount() > before
+        if got then Log("[NewItemCheck] got item:", tostring(name), "toolCount now =", ToolCount()) end
+        return got
+    end
+end
+
+local function WaitMenuClose()
+    pcall(function() Window:Hide() end)
+    Lumen.Notify("Starting in " .. MenuDelay .. "s", MenuDelay)
+    task.wait(MenuDelay)
+end
+
+local function TP(cf)
+    if not cf then
+        return Lumen.Notify("Position not set", 2)
+    end
+    local root = GetRoot()
+    if root then
+        root.CFrame = cf
+        Lumen.Notify("Teleportation successful", 2)
+    end
+end
+
+local function NearestPart(name, from)
+    local items = workspace:FindFirstChild("Prison_ITEMS")
+    local giver = items and items:FindFirstChild("giver")
+    if not giver then return nil end
+
+    local best, bestDist
+    for _, model in ipairs(giver:GetChildren()) do
+        if model.Name == name then
+            for _, obj in ipairs(model:GetDescendants()) do
+                if obj:IsA("BasePart") then
+                    local d = (obj.Position - from).Magnitude
+                    if not bestDist or d < bestDist then
+                        best, bestDist = obj, d
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function NearestChild(container, name, from, maxDist)
+    if not container then return nil end
+    local best, bestDist
+    for _, obj in ipairs(container:GetChildren()) do
+        if obj.Name == name and obj:IsA("BasePart") then
+            local d = (obj.Position - from).Magnitude
+            if d <= maxDist and (not bestDist or d < bestDist) then
+                best, bestDist = obj, d
+            end
+        end
+    end
+    return best
+end
+
+local function GiverCF(name)
+    local part = NearestPart(name, PoliceArea)
+    return part and CFrame.new(part.Position)
+end
+
+local function TPBack(cf, delay)
+    if not cf then
+        return Lumen.Notify("Position not found", 2)
+    end
+    local root = GetRoot()
+    if not root then return end
+
+    local old = root.CFrame
+    root.CFrame = cf
+    task.wait(delay or 0.5)
+
+    root = GetRoot()
+    if root then
+        root.CFrame = old
+        Lumen.Notify("Teleportation successful", 2)
+    end
+end
+
+local function IsFirstPerson()
+    local char = LocalPlayer.Character
+    local head = char and char:FindFirstChild("Head")
+    local cam = workspace.CurrentCamera
+    if not head or not cam then return false end
+    local d = (cam.CFrame.Position - head.Position).Magnitude
+    return d < 2, d
+end
+
+local function EnterFirstPerson()
+    local function try(label, fn)
+        local ok, err = pcall(fn)
+        Log(label, ok and "OK" or ("refused: " .. tostring(err)))
+        return ok
+    end
+
+    try("CameraMode", function()
+        LocalPlayer:SetProperty("CameraMode", "LockFirstPerson")
+    end)
+    try("ZoomDistance", function()
+        LocalPlayer:SetProperty("CameraMinZoomDistance", 0.5)
+        LocalPlayer:SetProperty("CameraMaxZoomDistance", 0.5)
+    end)
+
+    task.wait(0.4)
+
+    for _ = 1, 40 do
+        local ok, dist = IsFirstPerson()
+        if ok then
+            Log("first person OK (distance =", dist, ")")
+            FirstPerson = true
+            return true
+        end
+        pcall(mousescroll, 1)
+        task.wait(0.05)
+    end
+
+    local _, dist = IsFirstPerson()
+    Log("first person FAILED (distance =", dist, ")")
+    return false
+end
+
+local function ExitFirstPerson()
+    FirstPerson = false
+    pcall(function() LocalPlayer:SetProperty("CameraMode", "Classic") end)
+    pcall(function()
+        LocalPlayer:SetProperty("CameraMinZoomDistance", 0.5)
+        LocalPlayer:SetProperty("CameraMaxZoomDistance", 128)
+    end)
+    for _ = 1, 8 do pcall(mousescroll, -1) task.wait(0.02) end
+    Log("normal view restored")
+end
+
+local function AimCamera(part, deadline)
+    local cam = workspace.CurrentCamera
+    pcall(function() cam.CFrame = CFrame.new(cam.CFrame.Position, part.Position) end)
+    task.wait(0.1)
+
+    for i = 1, 40 do
+        if os.clock() > deadline then return false end
+
+        local cam2 = workspace.CurrentCamera
+        local target, onScreen = World.ToViewport(part.Position)
+        local center = World.ToViewport(cam2.CFrame.Position + cam2.CFrame.LookVector * 100)
+        local dx = target.X - center.X
+        local dy = target.Y - center.Y
+
+        if onScreen and math.abs(dx) < 20 and math.abs(dy) < 20 then
+            return true
+        end
+        if target.Z < 0 then dx = 300 end
+
+        local stepX = math.clamp(dx * 0.5, -150, 150)
+        local stepY = math.clamp(dy * 0.5, -100, 100)
+
+        if FirstPerson then
+            mousemoverel(stepX, stepY)
+        else
+            mouse2press()
+            task.wait(0.03)
+            mousemoverel(stepX, stepY)
+            task.wait(0.03)
+            mouse2release()
+        end
+        task.wait(0.08)
+    end
+    return false
+end
+
+local function ExtraTarget()
+    local rack = workspace:FindFirstChild("SWAT gun rack")
+    return rack and rack:FindFirstChild("Part")
+end
+
+local function ClickGet(label, standPos, part, hasFn, extraTargets)
+    local root = GetRoot()
+    if not root then return Lumen.Notify("Character not found", 2) end
+
+    local targets = { part }
+    if extraTargets then
+        for _, t in ipairs(extraTargets) do targets[#targets + 1] = t end
+    end
+
+    Log("[ClickGet]", label, "| part =", part:GetFullName(), "| targets =", #targets)
+
+    WaitMenuClose()
+
+    root = GetRoot()
+    if not root then return end
+    local old = root.CFrame
+
+    root.CFrame = CFrame.new(standPos, Vector3.new(part.Position.X, standPos.Y, part.Position.Z))
+    root.Anchored = true
+    task.wait(0.3)
+
+    EnterFirstPerson()
+
+    local deadline = os.clock() + ClickTimeout
+
+    Log("[ClickGet]", label, "camera centered =", AimCamera(part, deadline))
+
+    local got = false
+
+    if hasFn then
+        local attempts = 0
+        while os.clock() < deadline do
+            if hasFn() then got = true break end
+
+            for _, target in ipairs(targets) do
+                local screen, onScreen = World.ToViewport(target.Position)
+                if onScreen then
+                    mousemoveabs(screen.X, screen.Y)
+                    task.wait(0.1)
+                    mouse1click()
+                    attempts = attempts + 1
+                    Log("[ClickGet]", label, "click #"..attempts, "on", target:GetFullName())
+                end
+                if hasFn() then break end
+            end
+            task.wait(0.4)
+        end
+        if not got then got = hasFn() end
+    else
+        for _ = 1, 3 do
+            for _, target in ipairs(targets) do
+                local screen, onScreen = World.ToViewport(target.Position)
+                if onScreen then
+                    mousemoveabs(screen.X, screen.Y)
+                    task.wait(0.1)
+                    mouse1click()
+                    Log("[ClickGet]", label, "click (no hasFn) on", target:GetFullName())
+                end
+            end
+            task.wait(0.4)
+        end
+        got = true
+    end
+
+    if got then
+        Log("[ClickGet]", label, "SUCCESS")
+        Lumen.Notify(label .. " obtained", 3)
+    else
+        Log("[ClickGet]", label, "TIMEOUT")
+        Lumen.Notify("Timeout: Something was wrong", 4)
+    end
+
+    ExitFirstPerson()
+    root = GetRoot()
+    if root then
+        root.Anchored = false
+        root.CFrame = old
+    end
+end
+
+local function ClickSweep(label, standPos, hasFn)
+    local root = GetRoot()
+    if not root then return Lumen.Notify("Character not found", 2) end
+
+    Log("[ClickSweep]", label, "| standPos =", tostring(standPos))
+
+    WaitMenuClose()
+
+    root = GetRoot()
+    if not root then return end
+    local old = root.CFrame
+
+    root.CFrame = CFrame.new(standPos)
+    root.Anchored = true
+    task.wait(0.4)
+
+    EnterFirstPerson()
+    task.wait(0.2)
+
+    local cam = workspace.CurrentCamera
+    local cx, cy = 640, 360
+    if cam then
+        local center = World.ToViewport(cam.CFrame.Position + cam.CFrame.LookVector * 100)
+        if center and center.X > 100 and center.Y > 100 then
+            cx, cy = center.X, center.Y
+        end
+    end
+
+    local points = {}
+    local step = 32
+    local halfW, halfH = cx * 0.9, cy * 0.9
+    local x = -halfW
+    while x <= halfW do
+        local y = -halfH
+        while y <= halfH do
+            points[#points + 1] = { cx + x, cy + y, x * x + y * y }
+            y = y + step
+        end
+        x = x + step
+    end
+    table.sort(points, function(a, b) return a[3] < b[3] end)
+
+    Log("[ClickSweep]", label, "| sweep grid =", #points, "points")
+
+    local deadline = os.clock() + SweepTimeout
+    local got = false
+    local totalClicks = 0
+
+    while os.clock() < deadline and not got do
+        for i, p in ipairs(points) do
+            mousemoveabs(p[1], p[2])
+            task.wait(0.02)
+            mouse1click()
+            totalClicks = totalClicks + 1
+            task.wait(0.03)
+            if i % 4 == 0 then
+                if hasFn() then got = true break end
+            end
+            if os.clock() > deadline then break end
+        end
+        if not got then
+            Log("[ClickSweep]", label, "pass done | clicks =", totalClicks, "| elapsed =", math.floor((os.clock()-(deadline-SweepTimeout))*10)/10 .. "s")
+            got = hasFn()
+        end
+    end
+
+    if got then
+        Log("[ClickSweep]", label, "SUCCESS | total clicks =", totalClicks)
+        Lumen.Notify(label .. " obtained", 3)
+    else
+        Log("[ClickSweep]", label, "TIMEOUT | total clicks =", totalClicks)
+        Lumen.Notify("Timeout: Something was wrong", 4)
+    end
+
+    ExitFirstPerson()
+    root = GetRoot()
+    if root then
+        root.Anchored = false
+        root.CFrame = old
+    end
+end
+
+local function GetRevolverClick(standPos)
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    if HasTool("Revolver") then
+        return Lumen.Notify("You already have the Revolver", 3)
+    end
+
+    local part = NearestPart("Revolver", standPos)
+    if not part then return Lumen.Notify("Revolver not found", 3) end
+    Log("[GetRevolverClick] part =", part:GetFullName())
+
+    local extra
+    if (standPos - PoliceArea).Magnitude < 100 then
+        local rack = ExtraTarget()
+        if rack then extra = { rack } end
+    end
+
+    ClickGet("Revolver", standPos, part, function() return HasTool("Revolver") end, extra)
+end
+
+local function GetPoliceArmor()
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    local items = workspace:FindFirstChild("Prison_ITEMS")
+    local clothes = items and items:FindFirstChild("clothes")
+    local vest = clothes and clothes:FindFirstChild("Light Vest")
+    local part = vest and vest:FindFirstChild("Torso")
+    if not part then return Lumen.Notify("Light Vest not found", 3) end
+    Log("[GetPoliceArmor] part =", part:GetFullName())
+
+    ClickGet("Police Armor", ArmorStandPos, part)
+end
+
+local function GetCriminalArmor()
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    local items = workspace:FindFirstChild("Prison_ITEMS")
+    local clothes = items and items:FindFirstChild("clothes")
+    local mafia = clothes and clothes:FindFirstChild("Mafia")
+    local meshes = mafia and mafia:FindFirstChild("Meshes/vest (7)", true)
+    local part
+    if meshes then
+        if meshes:IsA("BasePart") then
+            part = meshes
+        else
+            part = meshes:FindFirstChildWhichIsA("BasePart", true)
+        end
+    end
+    if not part then return Lumen.Notify("Criminal Armor not found", 3) end
+    Log("[GetCriminalArmor] part =", part:GetFullName())
+
+    ClickGet("Criminal Armor", CrimArmorStandPos, part)
+end
+
+local function GetC4()
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    if HasTool("C4 Explosive") or HasTool("C4") then
+        return Lumen.Notify("You already have the C4", 3)
+    end
+
+    local items = workspace:FindFirstChild("Prison_ITEMS")
+    local giver = items and items:FindFirstChild("giver")
+    local c4 = giver and giver:FindFirstChild("C4 Explosive")
+    local part = c4 and c4:FindFirstChild("Explosive", true)
+    if part and not part:IsA("BasePart") then
+        part = part:FindFirstChildWhichIsA("BasePart", true)
+    end
+    if not part then return Lumen.Notify("C4 not found", 3) end
+    Log("[GetC4] part =", part:GetFullName())
+
+    ClickGet("C4", C4StandPos, part, function()
+        return HasTool("C4 Explosive") or HasTool("C4")
+    end)
+end
+
+local function GetKnife()
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    if HasTool("Knife") then
+        return Lumen.Notify("You already have the Knife", 3)
+    end
+
+    -- FIX: snapshot AVANT de chercher la part et d'attendre
+    local checkFn = NewItemCheck("Knife")
+
+    local grounds = workspace:FindFirstChild("Prison_Grounds")
+    local part = NearestChild(grounds, "Part", KnifeStandPos, 80)
+    if not part and grounds then
+        local p = grounds:FindFirstChild("Part")
+        if p and p:IsA("BasePart") then part = p end
+    end
+    if not part then return Lumen.Notify("Knife not found", 3) end
+    Log("[GetKnife] part =", part:GetFullName(), "| pos =", tostring(part.Position))
+
+    ClickGet("Knife", KnifeStandPos, part, checkFn)
+end
+
+local function GetHammer()
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    if HasTool("Hammer") then
+        return Lumen.Notify("You already have the Hammer", 3)
+    end
+
+    -- FIX: snapshot AVANT WaitMenuClose (qui attend 2s, pendant lesquels on pourrait ramasser qqch)
+    local checkFn = NewItemCheck("Hammer")
+    Log("[GetHammer] standPos =", tostring(HammerStandPos))
+
+    ClickSweep("Hammer", HammerStandPos, checkFn)
+end
+
+local function GetLunch()
+    if not GetRoot() then return Lumen.Notify("Character not found", 2) end
+
+    Log("[GetLunch] searching Models near", tostring(LunchStandPos))
+
+    local bestTargets, bestDist
+    for _, m in ipairs(workspace:GetChildren()) do
+        if m.Name == "Model" then
+            local a = m:FindFirstChild("Part")
+            local inner = m:FindFirstChild("Model")
+            local b = inner and inner:FindFirstChild("Part")
+            local list = {}
+            if a and a:IsA("BasePart") then list[#list + 1] = a end
+            if b and b:IsA("BasePart") then list[#list + 1] = b end
+            if #list > 0 then
+                local d = (list[1].Position - LunchStandPos).Magnitude
+                Log("[GetLunch] candidate Model =", m:GetFullName(), "| dist =", math.floor(d*10)/10, "| parts =", #list)
+                if not bestDist or d < bestDist then
+                    bestTargets, bestDist = list, d
+                end
+            end
+        end
+    end
+
+    if not bestTargets then
+        Log("[GetLunch] no Model found in Workspace")
+        return Lumen.Notify("Lunch not found", 3)
+    end
+
+    Log("[GetLunch] best target =", bestTargets[1]:GetFullName(), "| dist =", math.floor(bestDist*10)/10)
+
+    -- FIX: snapshot AVANT tout wait
+    local checkFn = NewItemCheck(nil)
+
+    local extra = {}
+    for i = 2, #bestTargets do extra[#extra + 1] = bestTargets[i] end
+
+    ClickGet("Lunch", LunchStandPos, bestTargets[1], checkFn, extra)
+end
+
+local function GetGunWalk(toolName, cf, skipWait, holdSecs)
+    local root = GetRoot()
+    if not root then return Lumen.Notify("Character not found", 2) end
+
+    if not cf then
+        return Lumen.Notify("Position not found", 2)
+    end
+
+    if HasTool(toolName) then
+        return Lumen.Notify("You already have the " .. toolName, 3)
+    end
+
+    Log("[GetGunWalk]", toolName, "| pos =", tostring(cf.Position))
+
+    if not skipWait then WaitMenuClose() end
+
+    root = GetRoot()
+    if not root then return end
+    local old = root.CFrame
+
+    local giverPart = NearestPart(toolName, cf.Position)
+    if giverPart and (giverPart.Position - cf.Position).Magnitude > 20 then
+        giverPart = nil
+    end
+    if giverPart then
+        Log("[GetGunWalk]", toolName, "giverPart =", giverPart:GetFullName())
+    else
+        Log("[GetGunWalk]", toolName, "no giverPart found (will use CFrame only)")
+    end
+
+    local deadline = os.clock() + 3
+    local got = false
+    local flip = false
+    local attempts = 0
+
+    while os.clock() < deadline do
+        if HasTool(toolName) then got = true break end
+
+        flip = not flip
+        root = GetRoot()
+        if not root then break end
+        root.CFrame = flip and cf or (cf * CFrame.new(0, 0, -5))
+        attempts = attempts + 1
+
+        if giverPart and firetouchinterest then
+            pcall(firetouchinterest, root, giverPart, 0)
+            pcall(firetouchinterest, root, giverPart, 1)
+        end
+
+        task.wait(0.15)
+    end
+    if not got then got = HasTool(toolName) end
+
+    Log("[GetGunWalk]", toolName, got and "SUCCESS" or "TIMEOUT", "| attempts =", attempts)
+
+    if got then
+        Lumen.Notify(toolName .. " obtained", 3)
+    else
+        Lumen.Notify("Timeout: Something was wrong", 4)
+    end
+
+    if got and holdSecs then task.wait(holdSecs) end
+
+    root = GetRoot()
+    if root then root.CFrame = old end
+end
+
+local function Safe(fn)
+    if Busy then return end
+    Busy = true
+    task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok then Log("ERROR:", err) end
+        pcall(keyrelease, "w")
+        pcall(mouse2release)
+        pcall(mouse1release)
+        if FirstPerson then pcall(ExitFirstPerson) end
+        local root = GetRoot()
+        if root then root.Anchored = false end
+        pcall(function() Window:Show() end)
+        Busy = false
+    end)
+end
+
+local PoliceGroup = TeleportTab:Section("Police Station")
+
+PoliceGroup:Button("Main", function() TP(CFrame.new(828.778, 99.990, 2289.072, 1.000, 0.000, 0.022, 0.000, 1.000, 0.000, -0.022, 0.000, 1.000)) end)
+PoliceGroup:Button("Armory", function() TP(CFrame.new(829.674, 99.977, 2244.806, 1.000, 0.000, 0.027, 0.000, 1.000, 0.000, -0.027, 0.000, 1.000)) end)
+PoliceGroup:Button("Offices", function() TP(CFrame.new(857.145, 99.990, 2276.005, -0.072, 0.000, -0.997, 0.000, 1.000, 0.000, 0.997, 0.000, -0.072)) end)
+PoliceGroup:Button("Kitchen", function() TP(CFrame.new(771.874, 99.990, 2237.317, 0.031, 0.000, -1.000, -0.000, 1.000, 0.000, 1.000, 0.000, 0.031)) end)
+
+local PrisonGroup = TeleportTab:Section("Prison")
+
+PrisonGroup:Button("Outdoor courtyard", function() TP(CFrame.new(785.413, 98.761, 2473.157, -0.999, -0.000, 0.035, -0.000, 1.000, 0.000, -0.035, 0.000, -0.999)) end)
+PrisonGroup:Button("Cafeteria", function() TP(CFrame.new(919.259, 106.794, 2289.338, 0.999, -0.000, -0.042, 0.000, 1.000, 0.000, 0.042, -0.000, 0.999)) end)
+PrisonGroup:Button("Prisoners kitchen", function() TP(CFrame.new(914.159, 99.990, 2225.455, 1.000, 0.000, -0.007, 0.000, 1.000, 0.000, 0.007, 0.000, 1.000)) end)
+PrisonGroup:Button("Prisoners rooms", function() TP(CFrame.new(917.278, 102.254, 2456.461, -1.000, -0.000, -0.007, -0.000, 1.000, 0.000, 0.007, 0.000, -1.000)) end)
+PrisonGroup:Button("Security gate", function() TP(CFrame.new(755.820, 102.737, 2328.930, 1.000, -0.000, 0.007, 0.000, 1.000, -0.000, -0.007, 0.000, 1.000)) end)
+PrisonGroup:Button("Entrance hall", function() TP(CFrame.new(678.893, 100.000, 2272.974, 0.014, 0.000, 1.000, 0.000, 1.000, -0.000, -1.000, 0.000, 0.014)) end)
+PrisonGroup:Button("Parking", function() TP(CFrame.new(618.125, 98.040, 2306.596, 0.035, 0.000, -0.999, 0.000, 1.000, 0.000, 0.999, -0.000, 0.035)) end)
+PrisonGroup:Button("Prison Roof", function() TP(CFrame.new(880.064, 134.548, 2294.804, -0.146, -0.000, 0.989, -0.000, 1.000, 0.000, -0.989, -0.000, -0.146)) end)
+PrisonGroup:Button("Police Cars Spawner", function() TP(CFrame.new(616.121, 98.040, 2471.305, -1.000, 0.000, 0.010, 0.000, 1.000, 0.000, -0.010, 0.000, -1.000)) end)
+PrisonGroup:Button("Distributor", function() TP(CFrame.new(989.026, 100.534, 2321.038, -0.118, 0.000, -0.993, 0.000, 1.000, 0.000, 0.993, -0.000, -0.118)) end)
+PrisonGroup:Button("Sewer", function() TP(CFrame.new(916.925, 78.700, 2144.518, 1.000, -0.000, -0.004, 0.000, 1.000, -0.000, 0.004, 0.000, 1.000)) end)
+
+local CityGroup = TeleportTab:Section("City")
+
+CityGroup:Button("Container", function() TP(CFrame.new(249.535, 82.443, 2360.983, 0.098, 0.000, 0.995, -0.000, 1.000, -0.000, -0.995, 0.000, 0.098)) end)
+CityGroup:Button("House #1", function() TP(CFrame.new(-300.570, 63.685, 2490.273, -0.000, 0.000, 1.000, -0.000, 1.000, -0.000, -1.000, -0.000, -0.000)) end)
+CityGroup:Button("House #2", function() TP(CFrame.new(-392.957, 60.623, 2027.970, 0.805, -0.000, 0.593, 0.000, 1.000, 0.000, -0.593, 0.000, 0.805)) end)
+CityGroup:Button("Shops #1", function() TP(CFrame.new(-464.837, 58.653, 1693.827, -0.122, -0.000, 0.993, 0.000, 1.000, 0.000, -0.993, 0.000, -0.122)) end)
+CityGroup:Button("Shops #2", function() TP(CFrame.new(439.682, 14.615, 1193.695, 0.998, 0.000, 0.056, -0.000, 1.000, -0.000, -0.056, 0.000, 0.998)) end)
+CityGroup:Button("Secret room", function() TP(CFrame.new(-28.489, 11.099, 1288.383, 0.041, 0.000, -0.999, -0.000, 1.000, 0.000, 0.999, 0.000, 0.041)) end)
+
+local CriminalsGroup = TeleportTab:Section("Criminals")
+
+CriminalsGroup:Button("Container", function() TP(CFrame.new(-964.191, 94.129, 2062.493, 0.063, 0.000, 0.998, 0.000, 1.000, -0.000, -0.998, 0.000, 0.063)) end)
+CriminalsGroup:Button("Criminals Spawns", function() TP(CFrame.new(-978.747, 108.164, 2057.804, -0.035, 0.000, 0.999, 0.000, 1.000, -0.000, -0.999, 0.000, -0.035)) end)
+CriminalsGroup:Button("Criminals Cars Spawns", function() TP(CFrame.new(-914.963, 95.127, 2162.822, -1.000, 0.000, -0.021, 0.000, 1.000, 0.000, 0.021, 0.000, -1.000)) end)
+CriminalsGroup:Button("Criminals Armory", function() TP(CFrame.new(-917.156, 94.129, 2047.311, -0.035, 0.000, -0.999, 0.000, 1.000, 0.000, 0.999, 0.000, -0.035)) end)
+CriminalsGroup:Button("Warehouse #1", function() TP(CFrame.new(-878.363, 93.797, 1977.995, -0.014, 0.000, 1.000, 0.000, 1.000, 0.000, -1.000, 0.000, -0.014)) end)
+CriminalsGroup:Button("Warehouse #2", function() TP(CFrame.new(-879.174, 93.796, 1918.942, -0.014, 0.000, 1.000, 0.000, 1.000, 0.000, -1.000, 0.000, -0.014)) end)
+
+local GunsGroup = GunsTab:Section("Police")
+
+GunsGroup:Button("MP5", function()
+    Safe(function() GetGunWalk("MP5", MP5Pos) end)
+end)
+GunsGroup:Button("Remington 870", function()
+    Safe(function() GetGunWalk("Remington 870", GiverCF("Remington 870")) end)
+end)
+
+GunsGroup:Separator()
+
+GunsGroup:Button("Revolver ( Need Gamepass )", function()
+    Safe(function() GetRevolverClick(PoliceArea) end)
+end)
+GunsGroup:Button("M700 ( Need Gamepass )", function()
+    Safe(function() GetGunWalk("M700", M700Pos) end)
+end)
+GunsGroup:Button("M4A1 ( Need Gamepass )", function()
+    Safe(function() GetGunWalk("M4A1", M4A1Pos) end)
+end)
+
+local CrimGunsGroup = GunsTab:Section("Criminals")
+
+CrimGunsGroup:Button("Remington 870", function()
+    Safe(function() GetGunWalk("Remington 870", CrimRemingtonPos) end)
+end)
+CrimGunsGroup:Button("AK-47", function()
+    Safe(function() GetGunWalk("AK-47", CrimAK47Pos) end)
+end)
+
+CrimGunsGroup:Separator()
+
+CrimGunsGroup:Button("M700 ( Need Gamepass )", function()
+    Safe(function() GetGunWalk("M700", CrimM700Pos) end)
+end)
+CrimGunsGroup:Button("Revolver ( Need Gamepass )", function()
+    Safe(function() GetRevolverClick(CrimRevolverPos.Position) end)
+end)
+CrimGunsGroup:Button("FAL ( Need Gamepass )", function()
+    Safe(function() GetGunWalk("FAL", CrimFALPos) end)
+end)
+
+-- Section "Prisonner" en premier, avant "Police"
+local ToolsPrisonerGroup = ToolsTab:Section("Prisonner")
+
+ToolsPrisonerGroup:Button("Knife", function()
+    Safe(function() GetKnife() end)
+end)
+
+ToolsPrisonerGroup:Button("Hammer", function()
+    Safe(function() GetHammer() end)
+end)
+
+ToolsPrisonerGroup:Button("Lunch", function()
+    Safe(function() GetLunch() end)
+end)
+
+local ToolsPoliceGroup = ToolsTab:Section("Police")
+
+ToolsPoliceGroup:Button("Police Armor ( Need GamePass )", function()
+    Safe(function() GetPoliceArmor() end)
+end)
+
+ToolsPoliceGroup:Button("Riot Shield ( Need GamePass )", function()
+    Safe(function() GetGunWalk("Riot Shield", RiotShieldPos) end)
+end)
+
+local ToolsCrimGroup = ToolsTab:Section("Criminals")
+
+ToolsCrimGroup:Button("Criminal Armor ( Need GamePass )", function()
+    Safe(function() GetCriminalArmor() end)
+end)
+
+ToolsCrimGroup:Button("C4 ( Need GamePass )", function()
+    Safe(function() GetC4() end)
+end)
+
+local ModGuns = {"Revolver", "FAL", "Remington 870", "M9", "M4A1", "M700", "AK-47", "MP5"}
+
+local Mods = {
+    {
+        key = "spread", toggle = "Custom Spread",
+        hint = "Sets the bullet spread. 0 = every bullet goes exactly where you aim.",
+        attrs = { { name = "SpreadRadius" } },
+        slider = { label = "Spread (0 = perfect aim)", min = 0, max = 10, default = 0 },
+    },
+    {
+        key = "range", toggle = "Infinite Range",
+        hint = "Bullets reach very far targets.",
+        attrs = { { name = "Range", fixed = 9999 }, { name = "AccurateRange", fixed = 9999 } },
+    },
+    {
+        key = "fullauto", toggle = "Full Auto",
+        hint = "Hold the mouse button to keep firing, even with semi-auto guns.",
+        attrs = { { name = "AutoFire", fixed = true } },
+    },
+    {
+        key = "firerate", toggle = "Rapid Fire",
+        hint = "Changes the delay between two shots. Lower = faster.",
+        attrs = { { name = "FireRate" } },
+        slider = { label = "Delay between shots (lower = faster)", min = 0.01, max = 1, default = 0.01 },
+    },
+    {
+        key = "damage", toggle = "Custom Damage",
+        hint = "Damage per bullet. Many games compute damage on the server, so it may have no effect.",
+        attrs = { { name = "Damage" } },
+        slider = { label = "Damage per bullet", min = 1, max = 10000, default = 100, int = true },
+    },
+    {
+        key = "bullets", toggle = "Custom Bullets Per Shot",
+        hint = "Number of bullets per shot. Only works on guns that have this value (shotguns).",
+        attrs = { { name = "ProjectileCount" } },
+        slider = { label = "Bullets per shot", min = 1, max = 30, default = 8, int = true },
+    },
+    {
+        key = "maxammo", toggle = "Custom Magazine Size",
+        hint = "Changes the magazine size. Reload once to fill it.",
+        attrs = { { name = "MaxAmmo" } },
+        slider = { label = "Magazine size", min = 1, max = 500, default = 100, int = true },
+    },
+    {
+        key = "infammo", toggle = "Infinite Ammo",
+        hint = "Refills the magazine every time it drops.",
+        attrs = {},
+    },
+    {
+        key = "reload", toggle = "Custom Reload Time",
+        hint = "Reload duration in seconds. 0 = instant.",
+        attrs = { { name = "ReloadTime" } },
+        slider = { label = "Reload time (seconds)", min = 0, max = 5, default = 0.1 },
+    },
+}
+
+local GunSettings = {}
+for _, gun in ipairs(ModGuns) do
+    local s = { on = {}, val = {} }
+    for _, m in ipairs(Mods) do
+        s.on[m.key] = false
+        s.val[m.key] = m.slider and m.slider.default or 0
+    end
+    GunSettings[gun] = s
+end
+
+local SelectedGun = ModGuns[1]
+local Syncing = false
+local ModsEnabled = true
+local AutoReload = true
+local ReloadDelay = 0.55
+local Originals = {}
+local Issues = {}
+local Reported = {}
+local StatusLabel
+local LastStatus = ""
+local Handles = { on = {}, val = {} }
+
+-- FIX: clé avec séparateur explicite pour éviter les collisions "M4A1.FireRate"+"missing" vs "M4A1.FireRate"+"ignored"
+local function Report(key, ...)
+    if Reported[key] then return end
+    Reported[key] = true
+    Log("[Mods]", ...)
+end
+
+local function Quantize(slider, v)
+    if slider.int then return math.floor(v + 0.5) end
+    return math.floor(v * 100 + 0.5) / 100
+end
+
+local function Same(a, b)
+    if type(a) == "number" and type(b) == "number" then
+        return math.abs(a - b) < 0.0001
+    end
+    return a == b
+end
+
+local function GetAttr(tool, attr)
+    local ok, v = pcall(function() return tool:GetAttribute(attr) end)
+    if ok then return v end
+    return nil
+end
+
+local function ToolKey(tool)
+    local ok, addr = pcall(function() return tool.Address end)
+    return tool.Name .. ":" .. (ok and tostring(addr) or "?")
+end
+
+local function Drive(tool, attr, on, value)
+    local issueKey = tool.Name .. "." .. attr
+    local store = Originals[ToolKey(tool)]
+
+    if not on then
+        Issues[issueKey] = nil
+        if store and store.attrs[attr] ~= nil then
+            local orig = store.attrs[attr].orig
+            store.attrs[attr] = nil
+            pcall(function() tool:SetAttribute(attr, orig) end)
+        end
+        return
+    end
+
+    local cur = GetAttr(tool, attr)
+    if cur == nil then
+        Issues[issueKey] = "missing"
+        -- FIX: clé séparée par ":missing" et ":ignored" pour que Report déduplique correctement
+        Report(issueKey .. ":missing", tool.Name, "does not have attribute", attr, "(ignored)")
+        return
+    end
+
+    if not store then
+        store = { tool = tool, attrs = {} }
+        Originals[ToolKey(tool)] = store
+    end
+
+    local rec = store.attrs[attr]
+    if not rec then
+        rec = { orig = cur, miss = 0 }
+        store.attrs[attr] = rec
+    end
+
+    if Same(cur, value) then
+        rec.miss = 0
+        Issues[issueKey] = nil
+        return
+    end
+
+    pcall(function() tool:SetAttribute(attr, value) end)
+    rec.miss = rec.miss + 1
+    if rec.miss >= 20 then
+        Issues[issueKey] = "ignored"
+        Report(issueKey .. ":ignored", tool.Name, attr, "is reset or ignored by the game")
+    end
+end
+
+local function RestoreAll()
+    for key, store in pairs(Originals) do
+        if store.tool then
+            for attr, rec in pairs(store.attrs) do
+                pcall(function() store.tool:SetAttribute(attr, rec.orig) end)
+            end
+        end
+        Originals[key] = nil
+    end
+end
+
+local function ApplyMods(tool)
+    local s = GunSettings[tool.Name]
+    if not s then return end
+
+    for _, m in ipairs(Mods) do
+        local on = ModsEnabled and s.on[m.key]
+        for _, a in ipairs(m.attrs) do
+            local v
+            if a.fixed ~= nil then
+                v = a.fixed
+            else
+                v = s.val[m.key]
+            end
+            -- v peut être 0 (number) quand le slider est à son minimum : c'est valide
+            Drive(tool, a.name, on, v)
+        end
+    end
+
+    if ModsEnabled and s.on.infammo then
+        local max = tonumber(GetAttr(tool, "MaxAmmo"))
+        if max then
+            for _, name in ipairs({ "CurrentAmmo", "Local_CurrentAmmo" }) do
+                local cur = tonumber(GetAttr(tool, name))
+                if cur and cur < max then
+                    pcall(function() tool:SetAttribute(name, max) end)
+                end
+            end
+        end
+    end
+end
+
+local function ForEachGun(fn, includeBackpack)
+    local char = LocalPlayer.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") and GunSettings[t.Name] then fn(t) end
+        end
+    end
+    if includeBackpack then
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") and GunSettings[t.Name] then fn(t) end
+            end
+        end
+    end
+end
+
+local function RefreshStatus()
+    if not StatusLabel then return end
+
+    local equipped
+    local char = LocalPlayer.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") and GunSettings[t.Name] then
+                equipped = t.Name
+                break
+            end
+        end
+    end
+
+    local text
+    if not ModsEnabled then
+        text = "Mods are OFF (original values restored)"
+    elseif equipped then
+        local count = 0
+        for _, v in pairs(GunSettings[equipped].on) do
+            if v then count = count + 1 end
+        end
+        text = "Equipped: " .. equipped .. " | Active mods: " .. count
+
+        local bad = {}
+        local prefix = equipped .. "."
+        for key, kind in pairs(Issues) do
+            if key:sub(1, #prefix) == prefix then
+                local name = key:sub(#prefix + 1)
+                bad[#bad + 1] = name .. (kind == "missing" and " (not on this gun)" or " (ignored by game)")
+            end
+        end
+        if #bad > 0 then
+            text = text .. " | " .. table.concat(bad, ", ")
+        end
+    else
+        text = "Equipped: no gun"
+    end
+
+    if text ~= LastStatus then
+        LastStatus = text
+        StatusLabel:SetText(text)
+    end
+end
+
+local function AddMod(group, m)
+    local toggle = group:Toggle(m.toggle, false, function(state)
+        if Syncing then return end
+        GunSettings[SelectedGun].on[m.key] = state
+    end)
+    Handles.on[m.key] = toggle
+    if toggle and m.hint then
+        pcall(function() toggle:SetHint(m.hint) end)
+    end
+
+    if m.slider then
+        local sl = m.slider
+        local function OnValue(v)
+            if Syncing then return end
+            GunSettings[SelectedGun].val[m.key] = Quantize(sl, v)
+        end
+        local handle
+        if sl.int then
+            handle = group:SliderInt(sl.label, sl.min, sl.max, sl.default, OnValue)
+        else
+            handle = group:Slider(sl.label, sl.min, sl.max, sl.default, OnValue)
+        end
+        Handles.val[m.key] = handle
+    end
+end
+
+local function ModByKey(key)
+    for _, m in ipairs(Mods) do
+        if m.key == key then return m end
+    end
+end
+
+local General = ModsTab:Section("General")
+
+General:Paragraph("How to use", "1) Pick a gun in 'Select Gun'.  2) Switch on the mods you want and set their slider.  3) Equip the gun. Mods apply by themselves. The status line below shows problems.")
+StatusLabel = General:Label("Equipped: no gun")
+
+local MasterToggle = General:Toggle("Mods Enabled", true, function(state)
+    ModsEnabled = state
+end)
+pcall(function() MasterToggle:SetHint("Master switch. Turning it off restores the original gun values.") end)
+
+local ReloadToggle = General:Toggle("Auto Reload", true, function(state)
+    AutoReload = state
+end)
+pcall(function() ReloadToggle:SetHint("Presses R for you when the magazine is empty. Needs the Lumen menu closed.") end)
+
+General:Slider("Auto Reload Delay", 0.1, 1.5, 0.55, function(v)
+    ReloadDelay = v
+end)
+
+General:Button("Apply Now", function()
+    ForEachGun(function(t) pcall(ApplyMods, t) end, true)
+    Lumen.Notify("Mods applied", 2)
+end)
+
+General:Button("Print Equipped Gun Attributes", function()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") then
+            print("== " .. t.Name .. " ==")
+            local ok, attrs = pcall(function() return t:GetAttributes() end)
+            if ok and attrs then
+                for k, v in pairs(attrs) do print(k, v) end
+            end
+            Lumen.Notify("Attributes printed in console", 2)
+            return
+        end
+    end
+    Lumen.Notify("No tool equipped", 2)
+end)
+
+local SelectGroup = ModsTab:Section("Select Gun (settings below apply to this gun)")
+
+SelectGroup:Dropdown("Select Gun", ModGuns, 1, function(idx, text)
+    SelectedGun = ModGuns[idx] or text
+    local profile = GunSettings[SelectedGun]
+    if not profile then return end
+
+    Syncing = true
+    for _, m in ipairs(Mods) do
+        local th = Handles.on[m.key]
+        if th then th:Set(profile.on[m.key]) end
+        local sh = Handles.val[m.key]
+        if sh then sh:Set(profile.val[m.key]) end
+    end
+    Syncing = false
+end)
+
+SelectGroup:Button("Copy These Settings To All Guns", function()
+    local src = GunSettings[SelectedGun]
+    for _, gun in ipairs(ModGuns) do
+        if gun ~= SelectedGun then
+            local dst = GunSettings[gun]
+            for k, v in pairs(src.on) do dst.on[k] = v end
+            for k, v in pairs(src.val) do dst.val[k] = v end
+        end
+    end
+    Lumen.Notify("Settings copied to all guns", 2)
+end)
+
+local AccuracyGroup = ModsTab:Section("Accuracy")
+AddMod(AccuracyGroup, ModByKey("spread"))
+AddMod(AccuracyGroup, ModByKey("range"))
+
+local FireGroup = ModsTab:Section("Firing")
+AddMod(FireGroup, ModByKey("fullauto"))
+AddMod(FireGroup, ModByKey("firerate"))
+AddMod(FireGroup, ModByKey("damage"))
+AddMod(FireGroup, ModByKey("bullets"))
+
+local AmmoGroup = ModsTab:Section("Ammo & Reload")
+AddMod(AmmoGroup, ModByKey("infammo"))
+AddMod(AmmoGroup, ModByKey("maxammo"))
+AddMod(AmmoGroup, ModByKey("reload"))
+
+-- ===================== FUN : KILL =====================
+local KillGun = "Remington 870"
+local KillDistance = 12
+local KillTimeout = 10
+local KillCancel = false
+local PerPage = 8
+local KillPicker
+local ArrestPicker
+
+local function TeamOf(p)
+    local name, color
+    pcall(function()
+        local t = p.Team
+        if t then name = tostring(t.Name) end
+    end)
+    pcall(function() color = tostring(p.TeamColor) end)
+    if not name and not color then return nil end
+    return (name or "?") .. " | " .. (color or "?")
+end
+
+local function IsPoliceTeam(t)
+    if not t then return false end
+    t = tostring(t):lower()
+    return t:find("guard") ~= nil or t:find("police") ~= nil
+        or t:find("cop") ~= nil or t:find("bright blue") ~= nil
+end
+
+local function IsCriminalTeam(t)
+    if not t then return false end
+    t = tostring(t):lower()
+    return t:find("criminal") ~= nil or t:find("really red") ~= nil
+end
+
+local function IsInmateTeam(t)
+    if not t then return false end
+    t = tostring(t):lower()
+    return t:find("inmate") ~= nil or t:find("prisoner") ~= nil
+        or t:find("bright orange") ~= nil or t:find("neon orange") ~= nil
+end
+
+local WeaponKeys = { "knife", "hammer", "revolver", "fal", "remington", "m9", "m4a1", "m700", "ak-47", "mp5", "c4" }
+
+local function IsWeaponName(n)
+    n = tostring(n):lower()
+    for _, k in ipairs(WeaponKeys) do
+        if n:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+local function HasWeapon(p)
+    local ok, res = pcall(function()
+        local c = p.Character
+        if c then
+            for _, t in ipairs(c:GetChildren()) do
+                if t:IsA("Tool") and IsWeaponName(t.Name) then return true end
+            end
+        end
+        local bp = p:FindFirstChild("Backpack")
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") and IsWeaponName(t.Name) then return true end
+            end
+        end
+        return false
+    end)
+    return ok and res == true
+end
+
+local function IsHostile(p)
+    local ok, res = pcall(function()
+        local c = p.Character
+        return c ~= nil and c:GetAttribute("Hostile") == true
+    end)
+    return ok and res == true
+end
+
+local function IsArmedInmate(p)
+    return IsInmateTeam(TeamOf(p)) and (IsHostile(p) or HasWeapon(p))
+end
+
+local function Arrestable(p)
+    local t = TeamOf(p)
+    if IsCriminalTeam(t) then return true end
+    return IsInmateTeam(t) and (IsHostile(p) or HasWeapon(p))
+end
+
+local function HasForceField(p)
+    local ok, res = pcall(function()
+        local c = p.Character
+        return c ~= nil and c:FindFirstChildOfClass("ForceField") ~= nil
+    end)
+    return ok and res == true
+end
+
+local BackpackCheck = false
+
+local function ComputeBackpackCheck()
+    for _, p in ipairs(game.Players:GetPlayers()) do
+        if p ~= LocalPlayer and p:FindFirstChild("Backpack") then return true end
+    end
+    return false
+end
+
+local function Listable(p)
+    if p == LocalPlayer then return false end
+    if HasForceField(p) then return false end
+    if BackpackCheck and not p:FindFirstChild("Backpack") then return false end
+    return true
+end
+
+local function PlayersWhere(filter)
+    BackpackCheck = ComputeBackpackCheck()
+    local list = {}
+    for _, p in ipairs(game.Players:GetPlayers()) do
+        if Listable(p) and filter(p) then list[#list + 1] = p.Name end
+    end
+    table.sort(list, function(a, b) return a:lower() < b:lower() end)
+    return list
+end
+
+local function OtherPlayers()
+    if IsPoliceTeam(TeamOf(LocalPlayer)) then
+        return PlayersWhere(Arrestable)
+    end
+    return PlayersWhere(function(p) return IsPoliceTeam(TeamOf(p)) end)
+end
+
+local ArrestModes = { "Criminals", "Hostile Inmates", "Criminals + Hostile Inmates" }
+local ArrestMode = ArrestModes[1]
+
+local function ArrestTeamList()
+    if not IsPoliceTeam(TeamOf(LocalPlayer)) then return {} end
+    return PlayersWhere(function(p)
+        if ArrestMode == "Criminals" then
+            return IsCriminalTeam(TeamOf(p))
+        elseif ArrestMode == "Hostile Inmates" then
+            return IsArmedInmate(p)
+        end
+        return Arrestable(p)
+    end)
+end
+
+local function ArrestablePlayers()
+    if not IsPoliceTeam(TeamOf(LocalPlayer)) then return {} end
+    return PlayersWhere(Arrestable)
+end
+
+local function RefreshPlayers()
+    if KillPicker then pcall(KillPicker.Refresh) end
+    if ArrestPicker then pcall(ArrestPicker.Refresh) end
+end
+
+local function EquipGun(name)
+    local function held()
+        local char = LocalPlayer.Character
+        return char ~= nil and char:FindFirstChild(name) ~= nil
+    end
+    if held() then return true end
+
+    local char = LocalPlayer.Character
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    local tool = bp and bp:FindFirstChild(name)
+    if not tool then return false end
+
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function() hum:EquipTool(tool) end)
+        task.wait(0.1)
+        if held() then return true end
+    end
+
+    pcall(function() tool.Parent = char end)
+    task.wait(0.1)
+    if held() then return true end
+
+    local words = { "one", "two", "three", "four", "five", "six", "seven", "eight", "nine" }
+    local idx = 0
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then
+                idx = idx + 1
+                if t.Name == name then break end
+            end
+        end
+    end
+    for slot = 1, 9 do
+        local n = (idx > 0 and idx <= 9) and idx or slot
+        for _, key in ipairs({ tostring(n), words[n] }) do
+            pcall(keyclick, key)
+            task.wait(0.1)
+            if held() then return true end
+        end
+        if idx > 0 and idx <= 9 then break end
+    end
+    return held()
+end
+
+local CollideBackup = {}
+
+local function NoClip()
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") then
+            if CollideBackup[p] == nil then
+                local okc, v = pcall(function() return p.CanCollide end)
+                CollideBackup[p] = (okc and v) or false
+            end
+            pcall(function() p.CanCollide = false end)
+        end
+    end
+end
+
+local function RestoreCollide()
+    for p, v in pairs(CollideBackup) do
+        pcall(function() p.CanCollide = v end)
+        CollideBackup[p] = nil
+    end
+end
+
+local function KeepStanding()
+    local c = LocalPlayer.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    if not h then return end
+    pcall(function()
+        if h.Sit then h.Sit = false end
+    end)
+end
+
+local function SeatLock(on)
+    local c = LocalPlayer.Character
+    local h = c and c:FindFirstChildOfClass("Humanoid")
+    if not h then return end
+    pcall(function() h:SetStateEnabled(Enum.HumanoidStateType.Seated, not on) end)
+    if on then KeepStanding() end
+end
+
+local TeamKillDistance = 12
+local TPInterval = 0.1
+
+local AutoKillOn = false
+local AutoKillRunning = false
+local AutoKillToggle
+local TeamDropdown
+local LastTeamLabel = ""
+
+local function KillPlayer(name, silent, distance)
+    local function Note(msg, t)
+        if not silent then Lumen.Notify(msg, t) end
+    end
+    distance = distance or KillDistance
+
+    if not name then Note("Select a player first", 3) return "invalid" end
+    if not GetRoot() then Note("Character not found", 2) return "invalid" end
+
+    local target
+    for _, p in ipairs(game.Players:GetPlayers()) do
+        if p.Name == name then target = p break end
+    end
+    if not target then Note("Player not found", 3) return "invalid" end
+
+    local myTeam, theirTeam = TeamOf(LocalPlayer), TeamOf(target)
+    if myTeam and theirTeam and myTeam == theirTeam then
+        Note(name .. " is in your team", 3)
+        return "invalid"
+    end
+
+    local function Info()
+        local c = target.Character
+        local r = c and c:FindFirstChild("HumanoidRootPart")
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        local head = c and c:FindFirstChild("Head")
+        return r, h, head
+    end
+
+    local function Health(h)
+        local ok, hp = pcall(function() return h.Health end)
+        return ok and hp or 0
+    end
+
+    local tr0, th0 = Info()
+    if not tr0 or not th0 or Health(th0) <= 0 then
+        Note(name .. " is not alive", 3)
+        return "dead"
+    end
+
+    if HasForceField(target) then
+        Note(name .. " has a forcefield", 3)
+        return "dead"
+    end
+
+    if not HasTool(KillGun) then
+        Note("You need the Remington: press 'Recup the Remington' first", 4)
+        return "nogun"
+    end
+
+    pcall(function() Window:Hide() end)
+    task.wait(0.1)
+
+    local root = GetRoot()
+    if not root then return "invalid" end
+    local old = root.CFrame
+    local myChar = LocalPlayer.Character
+
+    local function IAmDead()
+        local c = LocalPlayer.Character
+        if not c or c ~= myChar then return true end
+        local h = c:FindFirstChildOfClass("Humanoid")
+        if not h then return true end
+        local okh, hp = pcall(function() return h.Health end)
+        return (not okh) or hp <= 0
+    end
+
+    if not EquipGun(KillGun) then
+        Note("Could not equip the Remington", 5)
+        return "noequip"
+    end
+
+    local s = GunSettings[KillGun]
+    local saved = {
+        master = ModsEnabled,
+        auto = s.on.fullauto,
+        spread = s.on.spread, spreadVal = s.val.spread,
+    }
+    ModsEnabled = true
+    s.on.fullauto = true
+    s.on.spread = true; s.val.spread = 0
+
+    do
+        local char = LocalPlayer.Character
+        local gun = char and char:FindFirstChild(KillGun)
+        if gun then
+            pcall(ApplyMods, gun)
+        end
+    end
+
+    local killed, sawAlive, died = false, false, false
+    SeatLock(true)
+    local pressed = false
+    local tping = false
+
+    local function Release()
+        if pressed then
+            pcall(mouse1release)
+            pressed = false
+        end
+    end
+
+    local function TPStep()
+        if IAmDead() then return end
+        KeepStanding()
+        local myRoot = GetRoot()
+        local tr, _, head = Info()
+        if not myRoot or not tr then return end
+
+        local behind = tr.CFrame:PointToWorldSpace(Vector3.new(0, 0, distance))
+        local aimAt = (head and head.Position) or tr.Position
+        pcall(function()
+            myRoot.CFrame = CFrame.new(behind, Vector3.new(aimAt.X, behind.Y, aimAt.Z))
+        end)
+
+        local cam = workspace.CurrentCamera
+        if cam then
+            pcall(function() cam.CFrame = CFrame.new(cam.CFrame.Position, aimAt) end)
+        end
+    end
+
+    local ok, err = pcall(function()
+        EnterFirstPerson()
+        TPStep()
+
+        local r0 = GetRoot()
+        if r0 then r0.Anchored = true end
+
+        tping = true
+        task.spawn(function()
+            local nextAt = os.clock()
+            while tping and Alive() do
+                pcall(TPStep)
+                nextAt = nextAt + TPInterval
+                local now = os.clock()
+                if nextAt < now then nextAt = now end
+                task.wait(nextAt - now)
+            end
+        end)
+
+        local deadline = os.clock() + KillTimeout
+        local lastReload = 0
+        local lastAmmo, lastChange = nil, os.clock()
+        local repress = s.on.firerate and 0.12 or 0.4
+
+        while os.clock() < deadline and not KillCancel and Alive() do
+            if IAmDead() then
+                died = true
+                KillCancel = true
+                break
+            end
+
+            local tr, th, head = Info()
+            if not tr or not th then
+                if sawAlive then killed = true end
+                break
+            end
+            if Health(th) <= 0 then killed = true break end
+            sawAlive = true
+
+            local char = LocalPlayer.Character
+            local gun = char and char:FindFirstChild(KillGun)
+            if gun then
+                local aimPart = head or tr
+                local cam = workspace.CurrentCamera
+                if cam then
+                    pcall(function() cam.CFrame = CFrame.new(cam.CFrame.Position, aimPart.Position) end)
+                end
+                local screen, onScreen = World.ToViewport(aimPart.Position)
+                if onScreen and screen then
+                    mousemoveabs(screen.X, screen.Y)
+                end
+
+                pcall(ApplyMods, gun)
+
+                local ammo = tonumber(GetAttr(gun, "Local_CurrentAmmo")) or 1
+                local reloading = tostring(GetAttr(gun, "IsReloading")) == "true"
+
+                if ammo <= 0 then
+                    Release()
+                    if not reloading and os.clock() - lastReload > ReloadDelay then
+                        pcall(keyclick, "r")
+                        lastReload = os.clock()
+                    end
+                elseif reloading then
+                    Release()
+                else
+                    if not pressed then
+                        pcall(mouse1press)
+                        pressed = true
+                        lastChange = os.clock()
+                    end
+
+                    if lastAmmo ~= ammo then
+                        lastAmmo = ammo
+                        lastChange = os.clock()
+                    elseif os.clock() - lastChange > repress then
+                        Release()
+                        pcall(mouse1press)
+                        pressed = true
+                        lastChange = os.clock()
+                    end
+                end
+            else
+                Release()
+                EquipGun(KillGun)
+            end
+
+            task.wait()
+        end
+    end)
+    if not ok then
+        Log("Kill ERROR:", err)
+        Note("Kill error: " .. tostring(err), 5)
+    end
+
+    tping = false
+    SeatLock(false)
+    Release()
+    pcall(mouse1release)
+    s.on.fullauto = saved.auto
+    s.on.spread = saved.spread;   s.val.spread = saved.spreadVal
+    ModsEnabled = saved.master
+    ExitFirstPerson()
+
+    if not died then
+        root = GetRoot()
+        if root then
+            pcall(function() root.Anchored = false end)
+            root.CFrame = old
+        end
+    end
+
+    if died then
+        Lumen.Notify("You died: everything cancelled", 4)
+        return "died"
+    elseif killed then
+        Note(name .. " killed", 3)
+        return "killed"
+    elseif KillCancel then
+        Note("Kill cancelled", 3)
+        return "cancelled"
+    elseif ok then
+        Note("Not dead after " .. KillTimeout .. "s, back to start", 4)
+        return "timeout"
+    end
+    return "error"
+end
+
+local function TeamTargetLabel()
+    if IsPoliceTeam(TeamOf(LocalPlayer)) then return "Criminals + Hostile Inmates" end
+    return "Police"
+end
+
+local function Cleanup()
+    pcall(keyrelease, "w")
+    pcall(mouse2release)
+    pcall(mouse1release)
+    if FirstPerson then pcall(ExitFirstPerson) end
+    local r = GetRoot()
+    if r then r.Anchored = false end
+end
+
+local function KillTeam()
+    local label = TeamTargetLabel()
+    if not HasTool(KillGun) then
+        Lumen.Notify("You need the Remington: press 'Recup the Remington' first", 4)
+        return "nogun"
+    end
+
+    local list = OtherPlayers()
+    if #list == 0 then
+        Lumen.Notify("No players in " .. label, 3)
+        return "empty"
+    end
+
+    KillCancel = false
+    local kills = 0
+    local stop
+    for _, n in ipairs(list) do
+        if KillCancel or not Alive() then stop = "cancelled" break end
+        local r = KillPlayer(n, true, TeamKillDistance)
+        if r == "killed" then kills = kills + 1 end
+        if r == "nogun" or r == "noequip" or r == "cancelled" or r == "died" then stop = r break end
+    end
+    Lumen.Notify(label .. ": " .. kills .. "/" .. #list .. " killed", 4)
+    return stop or "done"
+end
+
+local function KillMany(names, silent)
+    if #names == 0 then
+        if not silent then Lumen.Notify("Select a player first", 3) end
+        return "invalid"
+    end
+    local kills, stop = 0, nil
+    for _, n in ipairs(names) do
+        if KillCancel or not Alive() then stop = "cancelled" break end
+        local r = KillPlayer(n, silent or #names > 1, KillDistance)
+        if r == "killed" then kills = kills + 1 end
+        if r == "nogun" or r == "noequip" or r == "cancelled" or r == "died" then stop = r break end
+    end
+    if #names > 1 then
+        Lumen.Notify("Kill: " .. kills .. "/" .. #names .. " killed", 4)
+    end
+    return stop or "done"
+end
+
+local function StopAutoKill()
+    AutoKillOn = false
+    if AutoKillToggle then pcall(function() AutoKillToggle:Set(false) end) end
+end
+
+local function AutoKillLoop()
+    if AutoKillRunning then return end
+    AutoKillRunning = true
+    task.spawn(function()
+        while AutoKillOn and Alive() do
+            if Busy then
+                task.wait(0.5)
+            else
+                if not HasTool(KillGun) then
+                    Lumen.Notify("AutoKill: get the Remington first", 4)
+                    StopAutoKill()
+                    break
+                end
+
+                local names = KillPicker and KillPicker.Names() or {}
+                if #names > 0 then
+                    Busy = true
+                    local ok, r = pcall(KillMany, names, true)
+                    Cleanup()
+                    Busy = false
+                    if not ok or r == "nogun" or r == "noequip" or r == "cancelled" or r == "died" then
+                        StopAutoKill()
+                        break
+                    end
+                end
+
+                pcall(function() Window:Show() end)
+                task.wait(0.8)
+            end
+        end
+        AutoKillRunning = false
+        Cleanup()
+        pcall(function() Window:Show() end)
+    end)
+end
+
+-- ===================== ARREST =====================
+local ArrestDistance = 1
+local ArrestTimeout = 8
+local CuffName = "Handcuffs"
+
+local function ArrestPlayer(name, silent)
+    local function Note(msg, t)
+        if not silent then Lumen.Notify(msg, t) end
+    end
+
+    if not name then Note("Select a player first", 3) return "invalid" end
+    if not GetRoot() then Note("Character not found", 2) return "invalid" end
+
+    if not IsPoliceTeam(TeamOf(LocalPlayer)) then
+        Note("Only Police can arrest", 3)
+        return "notpolice"
+    end
+
+    local target
+    for _, p in ipairs(game.Players:GetPlayers()) do
+        if p.Name == name then target = p break end
+    end
+    if not target then Note("Player not found", 3) return "invalid" end
+
+    if not Arrestable(target) then
+        Note(name .. " is not arrestable (criminal or hostile inmate only)", 3)
+        return "invalid"
+    end
+
+    local function Info()
+        local c = target.Character
+        local r = c and c:FindFirstChild("HumanoidRootPart")
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        local head = c and c:FindFirstChild("Head")
+        return r, h, head
+    end
+
+    local function Health(h)
+        local ok, hp = pcall(function() return h.Health end)
+        return ok and hp or 0
+    end
+
+    local tr0, th0 = Info()
+    if not tr0 or not th0 or Health(th0) <= 0 then
+        Note(name .. " is not alive", 3)
+        return "dead"
+    end
+
+    if HasForceField(target) then
+        Note(name .. " has a forcefield", 3)
+        return "dead"
+    end
+
+    if not HasTool(CuffName) then
+        Note("You need the Handcuffs", 4)
+        return "nocuffs"
+    end
+
+    pcall(function() Window:Hide() end)
+    task.wait(0.1)
+
+    local root = GetRoot()
+    if not root then return "invalid" end
+    local old = root.CFrame
+    local myChar = LocalPlayer.Character
+
+    local function IAmDead()
+        local c = LocalPlayer.Character
+        if not c or c ~= myChar then return true end
+        local h = c:FindFirstChildOfClass("Humanoid")
+        if not h then return true end
+        local okh, hp = pcall(function() return h.Health end)
+        return (not okh) or hp <= 0
+    end
+
+    local hadBackpack = target:FindFirstChild("Backpack") ~= nil
+    if not hadBackpack and ComputeBackpackCheck() then
+        Note(name .. " is already being arrested", 3)
+        return "dead"
+    end
+
+    if not EquipGun(CuffName) then
+        Note("Could not equip the Handcuffs", 5)
+        return "noequip"
+    end
+
+    local arrested, died, targetDead = false, false, false
+    SeatLock(true)
+    local tping = false
+
+    local function TPStep()
+        if IAmDead() then return end
+        KeepStanding()
+        local myRoot = GetRoot()
+        local tr, _, head = Info()
+        if not myRoot or not tr then return end
+
+        local behind = tr.CFrame:PointToWorldSpace(Vector3.new(0, 0, ArrestDistance))
+        local aimAt = (head and head.Position) or tr.Position
+        pcall(function()
+            myRoot.CFrame = CFrame.new(behind, Vector3.new(aimAt.X, behind.Y, aimAt.Z))
+        end)
+    end
+
+    local ok, err = pcall(function()
+        EnterFirstPerson()
+        TPStep()
+
+        local r0 = GetRoot()
+        if r0 then r0.Anchored = true end
+
+        tping = true
+        task.spawn(function()
+            local nextAt = os.clock()
+            while tping and Alive() do
+                pcall(TPStep)
+                nextAt = nextAt + TPInterval
+                local now = os.clock()
+                if nextAt < now then nextAt = now end
+                task.wait(nextAt - now)
+            end
+        end)
+
+        local deadline = os.clock() + ArrestTimeout
+        local lastPos
+        while os.clock() < deadline and not KillCancel and Alive() do
+            if IAmDead() then
+                died = true
+                KillCancel = true
+                break
+            end
+
+            if not target.Parent then
+                targetDead = true
+                break
+            end
+
+            if hadBackpack and not target:FindFirstChild("Backpack") then
+                arrested = true
+                break
+            end
+            if not Arrestable(target) then
+                arrested = true
+                break
+            end
+
+            local tr, th, head = Info()
+            if not tr or not th or Health(th) <= 0 then
+                targetDead = true
+                break
+            end
+
+            if lastPos and (tr.Position - lastPos).Magnitude > 50 then
+                arrested = true
+                break
+            end
+            lastPos = tr.Position
+
+            local char = LocalPlayer.Character
+            if not (char and char:FindFirstChild(CuffName)) then
+                EquipGun(CuffName)
+            end
+
+            local aimPart = head or tr
+            local cam = workspace.CurrentCamera
+            if cam then
+                pcall(function() cam.CFrame = CFrame.new(cam.CFrame.Position, aimPart.Position) end)
+            end
+            local screen, onScreen = World.ToViewport(aimPart.Position)
+            if onScreen and screen then
+                mousemoveabs(screen.X, screen.Y)
+            end
+            pcall(mouse1click)
+
+            task.wait(0.05)
+        end
+    end)
+    if not ok then
+        Log("Arrest ERROR:", err)
+        Note("Arrest error: " .. tostring(err), 5)
+    end
+
+    tping = false
+    SeatLock(false)
+    pcall(mouse1release)
+    ExitFirstPerson()
+
+    if not died then
+        root = GetRoot()
+        if root then
+            pcall(function() root.Anchored = false end)
+            root.CFrame = old
+        end
+    end
+
+    if died then
+        Lumen.Notify("You died: everything cancelled", 4)
+        return "died"
+    elseif arrested then
+        Note(name .. " arrested", 3)
+        return "arrested"
+    elseif KillCancel then
+        Note("Arrest cancelled", 3)
+        return "cancelled"
+    elseif targetDead then
+        Note(name .. " died / respawned, skipped", 3)
+        return "dead"
+    elseif ok then
+        Note("Could not arrest " .. name .. " in " .. ArrestTimeout .. "s", 4)
+        return "timeout"
+    end
+    return "error"
+end
+
+local function ArrestMany(names, silent)
+    if #names == 0 then
+        if not silent then Lumen.Notify("Select a player first", 3) end
+        return "invalid"
+    end
+    KillCancel = false
+    local count, stop = 0, nil
+    for _, n in ipairs(names) do
+        if KillCancel or not Alive() then stop = "cancelled" break end
+        local r = ArrestPlayer(n, silent or #names > 1)
+        if r == "arrested" then count = count + 1 end
+        if r == "nocuffs" or r == "noequip" or r == "notpolice" or r == "cancelled" or r == "died" then
+            stop = r
+            break
+        end
+    end
+    if #names > 1 then
+        Lumen.Notify("Arrest: " .. count .. "/" .. #names .. " arrested", 4)
+    end
+    return stop or "done"
+end
+
+local function ArrestTeam()
+    if not IsPoliceTeam(TeamOf(LocalPlayer)) then
+        Lumen.Notify("Only Police can arrest", 3)
+        return "notpolice"
+    end
+    if not HasTool(CuffName) then
+        Lumen.Notify("You need the Handcuffs", 4)
+        return "nocuffs"
+    end
+
+    local list = ArrestTeamList()
+    if #list == 0 then
+        Lumen.Notify("No one to arrest in: " .. ArrestMode, 3)
+        return "empty"
+    end
+
+    local r = ArrestMany(list, true)
+    return r
+end
+
+local AutoFlags = { kill = false, arrest = false, arrestp = false }
+local AutoRunning = { kill = false, arrest = false, arrestp = false }
+local AutoToggles = {}
+
+local function StopAuto(which)
+    AutoFlags[which] = false
+    local t = AutoToggles[which]
+    if t then pcall(function() t:Set(false) end) end
+end
+
+local function StopAllAuto()
+    StopAuto("kill")
+    StopAuto("arrest")
+    StopAuto("arrestp")
+    if AutoKillOn then StopAutoKill() end
+end
+
+local function StartAuto(which, runFn)
+    if AutoRunning[which] then return end
+    AutoRunning[which] = true
+    task.spawn(function()
+        while AutoFlags[which] and Alive() do
+            if Busy then
+                task.wait(0.5)
+            else
+                Busy = true
+                local ok, r = pcall(runFn)
+                Cleanup()
+                Busy = false
+                if not ok or r == "nogun" or r == "nocuffs" or r == "noequip"
+                    or r == "notpolice" or r == "cancelled" or r == "died" then
+                    StopAuto(which)
+                    break
+                end
+                pcall(function() Window:Show() end)
+                task.wait(1)
+            end
+        end
+        AutoRunning[which] = false
+        Cleanup()
+        pcall(function() Window:Show() end)
+    end)
+end
+
+local function MakePicker(group, title, getList, countWord)
+    local P = { page = 1, names = {}, all = {}, current = nil, sel = {}, key = "", getList = getList }
+
+    P.info = group:Label(countWord .. ": 0 | Page 1/1")
+    P.selInfo = group:Label("Selected: none (uses the shown player)")
+    P.dd = group:Dropdown(title, { "(no players)" }, 1, function(idx, text)
+        local n = P.names[idx] or text
+        if n and n ~= "(no players)" then P.current = n end
+    end)
+
+    local function UpdateSel()
+        local chosen = {}
+        for _, n in ipairs(P.all) do
+            if P.sel[n] then chosen[#chosen + 1] = n end
+        end
+        local text
+        if #chosen == 0 then
+            text = "Selected: none (uses the shown player)"
+        else
+            text = "Selected (" .. #chosen .. "): " .. table.concat(chosen, ", ")
+        end
+        if #text > 120 then text = text:sub(1, 117) .. "..." end
+        pcall(function() P.selInfo:SetText(text) end)
+    end
+
+    function P.Refresh()
+        local all = getList()
+        P.all = all
+        P.key = table.concat(all, "|")
+
+        local present = {}
+        for _, n in ipairs(all) do present[n] = true end
+        for n in pairs(P.sel) do
+            if not present[n] then P.sel[n] = nil end
+        end
+
+        local pages = math.max(1, math.ceil(#all / PerPage))
+        if P.page > pages or P.page < 1 then P.page = 1 end
+
+        local items = {}
+        local first = (P.page - 1) * PerPage
+        for i = first + 1, math.min(first + PerPage, #all) do
+            items[#items + 1] = all[i]
+        end
+
+        local keep = 1
+        for i, n in ipairs(items) do
+            if n == P.current then keep = i break end
+        end
+
+        if #items == 0 then
+            items = { "(no players)" }
+            P.current = nil
+        else
+            P.current = items[keep]
+        end
+        P.names = items
+
+        pcall(function() P.dd:SetItems(items) end)
+        pcall(function() P.dd:Set(keep) end)
+        pcall(function()
+            P.info:SetText(countWord .. ": " .. #all .. " | Page " .. P.page .. "/" .. pages)
+        end)
+        UpdateSel()
+    end
+
+    function P.Names()
+        local out = {}
+        for _, n in ipairs(P.all) do
+            if P.sel[n] then out[#out + 1] = n end
+        end
+        if #out == 0 and P.current then out[1] = P.current end
+        return out
+    end
+
+    function P.Check()
+        local ok, all = pcall(getList)
+        if ok and table.concat(all, "|") ~= P.key then
+            pcall(P.Refresh)
+        end
+    end
+
+    group:Button("Refresh players", function() P.Refresh() end)
+    group:Button("Next page (" .. PerPage .. " players per page)", function()
+        P.page = P.page + 1
+        P.Refresh()
+    end)
+    group:Button("Select / Unselect shown player", function()
+        if P.current then
+            if P.sel[P.current] then P.sel[P.current] = nil else P.sel[P.current] = true end
+            UpdateSel()
+        end
+    end)
+    group:Button("Select all players", function()
+        for _, n in ipairs(P.all) do P.sel[n] = true end
+        UpdateSel()
+    end)
+    group:Button("Clear selection", function()
+        P.sel = {}
+        UpdateSel()
+    end)
+
+    return P
+end
+
+local KillGroup = FunTab:Section("Kill")
+
+KillPicker = MakePicker(KillGroup, "Target", OtherPlayers, "Enemies")
+
+KillGroup:Separator()
+
+KillGroup:Button("Recup the Remington", function()
+    Safe(function()
+        GetGunWalk(KillGun, CrimRemingtonPos, true)
+    end)
+end)
+
+KillGroup:Button("Kill", function()
+    Safe(function()
+        KillCancel = false
+        KillMany(KillPicker.Names(), false)
+    end)
+end)
+
+KillGroup:Button("Cancel Kill", function()
+    KillCancel = true
+    StopAllAuto()
+end)
+
+AutoKillToggle = KillGroup:Toggle("AutoKill", false, function(state)
+    AutoKillOn = state
+    if state then
+        KillCancel = false
+        AutoKillLoop()
+    end
+end)
+pcall(function() AutoKillToggle:SetHint("Keeps killing the selected target every time he is alive. The menu reappears between two kills so you can turn it off.") end)
+
+KillGroup:SliderInt("Distance behind target", 2, 30, 12, function(v)
+    KillDistance = v
+end)
+
+-- ===================== FUN : KILL-TEAMS =====================
+local TeamGroup = FunTab:Section("Kill-Teams")
+
+LastTeamLabel = TeamTargetLabel()
+TeamDropdown = TeamGroup:Dropdown("Target team", { LastTeamLabel }, 1, function() end)
+
+TeamGroup:Button("Kill Team", function()
+    Safe(function() KillTeam() end)
+end)
+
+TeamGroup:Button("Recup the Remington (Team)", function()
+    Safe(function()
+        GetGunWalk(KillGun, CrimRemingtonPos, true)
+    end)
+end)
+
+AutoToggles.kill = TeamGroup:Toggle("Auto-Kill Team", false, function(state)
+    AutoFlags.kill = state
+    if state then
+        KillCancel = false
+        StartAuto("kill", KillTeam)
+    end
+end)
+pcall(function() AutoToggles.kill:SetHint("Kills the whole target team again and again. Stops if you die. The menu reappears between two passes.") end)
+
+TeamGroup:SliderInt("Team distance behind target", 2, 30, 12, function(v)
+    TeamKillDistance = v
+end)
+
+-- ===================== FUN : AUTO-ARREST (players) =====================
+local ArrestGroup = FunTab:Section("Auto-Arrest")
+
+ArrestPicker = MakePicker(ArrestGroup, "Player", ArrestablePlayers, "Arrestable")
+
+ArrestGroup:Separator()
+
+ArrestGroup:Button("Arrest Player selected", function()
+    Safe(function()
+        KillCancel = false
+        ArrestMany(ArrestPicker.Names(), false)
+    end)
+end)
+
+ArrestGroup:Button("Cancel Arrest", function()
+    KillCancel = true
+    StopAllAuto()
+end)
+
+AutoToggles.arrestp = ArrestGroup:Toggle("Auto-Arrest", false, function(state)
+    AutoFlags.arrestp = state
+    if state then
+        KillCancel = false
+        StartAuto("arrestp", function()
+            return ArrestMany(ArrestPicker.Names(), true)
+        end)
+    end
+end)
+pcall(function() AutoToggles.arrestp:SetHint("Arrests the selected player(s) again and again (Police only, needs Handcuffs). Stops if you die. The menu reappears between two passes.") end)
+
+ArrestGroup:SliderInt("Arrest distance (0 = inside the target)", 0, 8, 1, function(v)
+    ArrestDistance = v
+end)
+
+-- ===================== FUN : AUTO-ARREST-TEAMS =====================
+local ArrestTeamsGroup = FunTab:Section("Auto-Arrest-Teams")
+
+ArrestTeamsGroup:Dropdown("Teams", ArrestModes, 1, function(idx, text)
+    ArrestMode = ArrestModes[idx] or text or ArrestModes[1]
+end)
+
+ArrestTeamsGroup:Button("Arrest All", function()
+    Safe(function() ArrestTeam() end)
+end)
+
+ArrestTeamsGroup:Button("Cancel Arrest", function()
+    KillCancel = true
+    StopAllAuto()
+end)
+
+AutoToggles.arrest = ArrestTeamsGroup:Toggle("Auto-Arrest Teams", false, function(state)
+    AutoFlags.arrest = state
+    if state then
+        KillCancel = false
+        StartAuto("arrest", ArrestTeam)
+    end
+end)
+pcall(function() AutoToggles.arrest:SetHint("Arrests the selected team again and again (Police only, needs Handcuffs). Stops if you die. The menu reappears between two passes.") end)
+
+RefreshPlayers()
+
+task.spawn(function()
+    while Alive() do
+        task.wait(1)
+        if not Alive() then break end
+        if not Busy then
+            local okl, lbl = pcall(TeamTargetLabel)
+            if okl and lbl ~= LastTeamLabel then
+                LastTeamLabel = lbl
+                pcall(function() TeamDropdown:SetItems({ lbl }) end)
+                pcall(function() TeamDropdown:Set(1) end)
+            end
+
+            if KillPicker then KillPicker.Check() end
+            if ArrestPicker then ArrestPicker.Check() end
+
+            -- Refresh du status des mods en arrière-plan
+            pcall(RefreshStatus)
+        end
+    end
+end)
+
+pcall(function()
+    game.Players.PlayerAdded:Connect(function()
+        task.delay(0.5, function() if Alive() then RefreshPlayers() end end)
+    end)
+end)
+pcall(function()
+    game.Players.PlayerRemoving:Connect(function()
+        task.delay(0.5, function() if Alive() then RefreshPlayers() end end)
+    end)
+end)
+
+
+-- ===================== MISC =====================
+local function BuildMisc()
+    local RunService = game:GetService("RunService")
+
+    local Tab = MiscTab
+    if not Tab then
+        local W = UI.Window({
+            Title = "Misc",
+            Key   = "misc_menu",
+            Width = 600,
+            Height = 300,
+        })
+        W:SetVisible(true)
+        W:BindToMenu(true)
+        Tab = W:Tab("Misc")
+    end
+
+    local MiscGroup = Tab:Section("Misc")
+
+    -- ---- Delete All Doors (bouton, exécution unique) ----
+    MiscGroup:Button("Delete All Doors", function()
+        local count = 0
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj.Name:lower():find("door", 1, true) then
+                local ok = pcall(function() obj:Destroy() end)
+                if ok then count = count + 1 end
+            end
+        end
+        Lumen.Notify("Doors deleted: " .. count, 2)
+    end)
+
+    -- ---- Give All Guns (local) ----
+    MiscGroup:Button("Give All Guns (local)", function()
+        local tools = game.ReplicatedStorage:FindFirstChild("Tools")
+        if not tools then
+            Lumen.Notify("ReplicatedStorage.Tools not found", 3)
+            return
+        end
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        if not bp then
+            Lumen.Notify("Backpack not found", 3)
+            return
+        end
+        local count = 0
+        for _, tool in ipairs(tools:GetChildren()) do
+            if tool:IsA("Tool") then
+                -- Lumen: Clone prend le parent en premier argument
+                local ok = pcall(function() tool:Clone(bp) end)
+                if ok then count = count + 1 end
+            end
+        end
+        Lumen.Notify("Gave " .. count .. " tools to backpack", 3)
+    end)
+
+    -- ---- Rainbow Mode ----
+    local rainbowConn = nil
+    local rainbowHue  = 0
+
+    MiscGroup:Toggle("Rainbow Mode", false, function(state)
+        if rainbowConn then rainbowConn:Disconnect() rainbowConn = nil end
+        if state then
+            Lumen.Notify("Rainbow Mode ON", 2)
+            rainbowConn = RunService.Heartbeat:Connect(function(dt)
+                rainbowHue = (rainbowHue + dt * 0.3) % 1
+                local color = Color3.fromHSV(rainbowHue, 1, 1)
+                for _, obj in ipairs(workspace:GetDescendants()) do
+                    if obj:IsA("BasePart") then
+                        pcall(function() obj.Color = color end)
+                    end
+                end
+            end)
+        else
+            Lumen.Notify("Rainbow Mode OFF", 2)
+        end
+    end)
+end
+
+BuildMisc()
