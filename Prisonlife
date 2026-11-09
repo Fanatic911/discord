@@ -20,12 +20,26 @@ local Window = UI.Window({
 Window:SetVisible(true)
 Window:BindToMenu(true)
 
+local MenuOpen = true
+local function ShowMenu()
+    pcall(function() Window:Show() end)
+    MenuOpen = true
+end
+local function HideMenu()
+    pcall(function() Window:Hide() end)
+    MenuOpen = false
+end
+local function ToggleMenu()
+    if MenuOpen then HideMenu() else ShowMenu() end
+end
+
 local TeleportTab = Window:Tab("Teleport")
 local GunsTab = Window:Tab("Guns")
 local ToolsTab = Window:Tab("Tools and Armors")
 local ModsTab = Window:Tab("Guns Moddings")
 local FunTab = Window:Tab("Fun")
 local MiscTab = Window:Tab("Misc")
+local SettingsTab = Window:Tab("Settings")
 
 local LocalPlayer = game.Players.LocalPlayer
 local PoliceArea = Vector3.new(828.171, 99.977, 2232.139)
@@ -99,7 +113,7 @@ local function NewItemCheck(name)
 end
 
 local function WaitMenuClose()
-    pcall(function() Window:Hide() end)
+    HideMenu()
     Lumen.Notify("Starting in " .. MenuDelay .. "s", MenuDelay)
     task.wait(MenuDelay)
 end
@@ -660,7 +674,7 @@ local function Safe(fn)
         if FirstPerson then pcall(ExitFirstPerson) end
         local root = GetRoot()
         if root then root.Anchored = false end
-        pcall(function() Window:Show() end)
+        ShowMenu()
         Busy = false
     end)
 end
@@ -1454,7 +1468,7 @@ local function KillPlayer(name, silent, distance)
         return "nogun"
     end
 
-    pcall(function() Window:Hide() end)
+    HideMenu()
     task.wait(0.1)
 
     local root = GetRoot()
@@ -1742,13 +1756,13 @@ local function AutoKillLoop()
                     end
                 end
 
-                pcall(function() Window:Show() end)
+                ShowMenu()
                 task.wait(0.8)
             end
         end
         AutoKillRunning = false
         Cleanup()
-        pcall(function() Window:Show() end)
+        ShowMenu()
     end)
 end
 
@@ -1810,7 +1824,7 @@ local function ArrestPlayer(name, silent)
         return "nocuffs"
     end
 
-    pcall(function() Window:Hide() end)
+    HideMenu()
     task.wait(0.1)
 
     local root = GetRoot()
@@ -2042,13 +2056,13 @@ local function StartAuto(which, runFn)
                     StopAuto(which)
                     break
                 end
-                pcall(function() Window:Show() end)
+                ShowMenu()
                 task.wait(1)
             end
         end
         AutoRunning[which] = false
         Cleanup()
-        pcall(function() Window:Show() end)
+        ShowMenu()
     end)
 end
 
@@ -2395,3 +2409,50 @@ local function BuildMisc()
 end
 
 BuildMisc()
+
+-- ===================== SETTINGS =====================
+local function BuildSettings()
+    local SettingsGroup = SettingsTab:Section("Settings")
+
+    local KeyList = {
+        "insert", "rightshift", "rightcontrol", "delete", "home", "end",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+        "p", "m", "k"
+    }
+    local MenuKey = KeyList[1]
+    local KeyWarned = false
+
+    SettingsGroup:Paragraph("open/close menu", "Pick a key below. Press it in game to hide or show the menu.")
+    local KeyLabel = SettingsGroup:Label("Current key: " .. MenuKey)
+
+    SettingsGroup:Dropdown("open/close menu", KeyList, 1, function(idx, text)
+        MenuKey = KeyList[idx] or text or KeyList[1]
+        pcall(function() KeyLabel:SetText("Current key: " .. MenuKey) end)
+        Lumen.Notify("open/close menu key: " .. MenuKey, 2)
+    end)
+
+    SettingsGroup:Button("open/close menu (test)", function()
+        ToggleMenu()
+    end)
+
+    task.spawn(function()
+        local wasDown = false
+        while Alive() do
+            task.wait(0.05)
+            local ok, down = pcall(iskeypressed, MenuKey)
+            if ok then
+                down = down == true
+                if down and not wasDown and not Busy then
+                    ToggleMenu()
+                end
+                wasDown = down
+            elseif not KeyWarned then
+                KeyWarned = true
+                Log("[Settings] iskeypressed failed:", tostring(down))
+                Lumen.Notify("Key detection not supported here", 4)
+            end
+        end
+    end)
+end
+
+BuildSettings()
