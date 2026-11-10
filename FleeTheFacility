@@ -1,0 +1,1145 @@
+-- Flee the Facility — Beast ESP + Exit Door ESP + Computer ESP
+-- v10 : optimisé
+--   * plus de lissage : la box colle exactement à l'objet quand tu bouges la caméra
+--   * mise à jour APRÈS la caméra de Roblox (plus de décalage quand tu tournes)
+--   * une propriété Drawing n'est réécrite que si elle a changé
+--   * scans du workspace beaucoup moins fréquents (plus de saccades)
+--   * aucun task.wait / task.spawn / DescendantAdded
+
+local Env = getgenv()
+
+-- Arrête les anciennes boucles sans attendre
+Env._FleeESP_Id = (Env._FleeESP_Id or 0) + 1
+local MyId = Env._FleeESP_Id
+
+-- Déconnecte les anciennes connexions
+if Env._FleeESP_Conns then
+    for _, c in ipairs(Env._FleeESP_Conns) do
+        pcall(function() c:Disconnect() end)
+    end
+end
+Env._FleeESP_Conns = {}
+
+-- Nettoyage des Drawing objects de l'exécution précédente
+if Env._FleeESP_Drawings then
+    for _, d in ipairs(Env._FleeESP_Drawings) do
+        pcall(function() d:Remove() end)
+    end
+end
+Env._FleeESP_Drawings = {}
+
+-- Nettoyage des Highlights (Charm) de l'exécution précédente
+if Env._FleeESP_Highlights then
+    for _, h in ipairs(Env._FleeESP_Highlights) do
+        pcall(function() h:Destroy() end)
+    end
+end
+Env._FleeESP_Highlights = {}
+
+local function NewDrawing(kind)
+    local d = Drawing.new(kind)
+    table.insert(Env._FleeESP_Drawings, d)
+    return d
+end
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer      = Players.LocalPlayer
+
+-- ===================== NOMS A CHERCHER =====================
+local ExitDoorNames = { "Exit Door", "ExitDoor" }
+local ComputerNames = { "ComputerTable" }
+local ScreenName    = "Screen"
+local LightName     = "Light"
+
+-- ===================== COULEURS STATUT =====================
+local GREEN = Color3.fromRGB(0, 255, 80)
+local RED   = Color3.fromRGB(255, 40, 40)
+
+-- ===================== ERREURS VISIBLES (une seule fois par erreur) =====================
+local seenErr = {}
+local function Report(label, err)
+    local key = label .. tostring(err)
+    if seenErr[key] then return end
+    seenErr[key] = true
+    warn("[Flee ESP] " .. label .. " : " .. tostring(err))
+end
+
+local function Safe(label, fn, ...)
+    local ok, err = pcall(fn, ...)
+    if not ok then Report(label, err) end
+    return ok
+end
+
+-- ===================== SETTINGS BEAST =====================
+local BeastSettings = {
+    BoxEnabled    = false,
+    BoxStyle      = "Square",
+    BoxColor      = Color3.fromRGB(255, 0, 0),
+    BoxThickness  = 2,
+    HealthEnabled = false,
+    HealthBased   = false,
+    TracerEnabled = false,
+    TracerOrigin  = "Bottom",
+    TracerColor   = Color3.fromRGB(255, 0, 0),
+    TracerThick   = 1,
+    NameEnabled   = false,
+    NameDisplay   = "UserName",
+    NameColor     = Color3.fromRGB(255, 255, 255),
+    NameSize      = 14,
+    MaxDist       = 500,
+    TargetName    = "Hammer",
+    CharmEnabled  = false,
+    CharmFill     = Color3.fromRGB(255, 0, 0),
+    CharmOutline  = Color3.fromRGB(255, 255, 255),
+    CharmFillT    = 50,     -- transparence du remplissage en %
+}
+
+-- ===================== SETTINGS EXIT DOOR =====================
+local DoorSettings = {
+    BoxEnabled      = false,
+    BoxStyle        = "Square",
+    BoxColor        = Color3.fromRGB(0, 200, 255),
+    BoxThickness    = 2,
+    NameEnabled     = false,
+    NameSize        = 14,
+    NameColor       = Color3.fromRGB(255, 255, 255),
+    CheckAvailable  = false,
+    MaxDist         = 1000,
+    CharmEnabled    = false,
+    CharmFill       = Color3.fromRGB(0, 200, 255),
+    CharmOutline    = Color3.fromRGB(255, 255, 255),
+    CharmFillT      = 50,
+}
+
+-- ===================== SETTINGS COMPUTER =====================
+local ComputerSettings = {
+    BoxEnabled     = false,
+    BoxStyle       = "Square",
+    BoxColor       = Color3.fromRGB(255, 200, 0),
+    BoxThickness   = 2,
+    NameEnabled    = false,
+    NameSize       = 14,
+    NameColor      = Color3.fromRGB(255, 255, 255),
+    CheckCompleted = false,
+    MaxDist        = 1000,
+    CharmEnabled   = false,
+    CharmFill      = Color3.fromRGB(255, 200, 0),
+    CharmOutline   = Color3.fromRGB(255, 255, 255),
+    CharmFillT     = 50,
+}
+
+-- ===================== WINDOW =====================
+local Window = UI.Window({
+    Title  = "Flee the Facility",
+    Key    = "flee_esp_menu",
+    Width  = 560,
+    Height = 650,
+})
+Window:SetVisible(true)
+Window:BindToMenu(true)
+
+local BeastTab    = Window:Tab("Beast ESP")
+local DoorTab     = Window:Tab("Exit Door ESP")
+local ComputerTab = Window:Tab("Computer ESP")
+
+-- ===================== BEAST TAB UI =====================
+local InfoSection = BeastTab:Section("Info")
+InfoSection:Label("This ESP is displayed on the villain player")
+
+local BoxSection = BeastTab:Section("Box")
+BoxSection:Toggle("Enabled", BeastSettings.BoxEnabled, function(v)
+    BeastSettings.BoxEnabled = v
+end)
+BoxSection:Dropdown("Style", { "Square", "Corner" }, 1, function(_, text)
+    BeastSettings.BoxStyle = text
+end)
+BoxSection:ColorPicker("Color", BeastSettings.BoxColor, function(c)
+    BeastSettings.BoxColor = c
+end)
+BoxSection:SliderInt("Thickness", 1, 5, BeastSettings.BoxThickness, function(v)
+    BeastSettings.BoxThickness = v
+end)
+
+local HealthSection = BeastTab:Section("Health Bar")
+HealthSection:Toggle("Enabled", BeastSettings.HealthEnabled, function(v)
+    BeastSettings.HealthEnabled = v
+end)
+HealthSection:Toggle("Health Based Color", BeastSettings.HealthBased, function(v)
+    BeastSettings.HealthBased = v
+end)
+
+local TracerSection = BeastTab:Section("Tracer")
+TracerSection:Toggle("Enabled", BeastSettings.TracerEnabled, function(v)
+    BeastSettings.TracerEnabled = v
+end)
+TracerSection:Dropdown("Origin", { "Top", "Bottom", "Mouse" }, 2, function(_, text)
+    BeastSettings.TracerOrigin = text
+end)
+TracerSection:ColorPicker("Color", BeastSettings.TracerColor, function(c)
+    BeastSettings.TracerColor = c
+end)
+TracerSection:SliderInt("Thickness", 1, 4, BeastSettings.TracerThick, function(v)
+    BeastSettings.TracerThick = v
+end)
+
+local NameSection = BeastTab:Section("Name")
+NameSection:Toggle("Enabled", BeastSettings.NameEnabled, function(v)
+    BeastSettings.NameEnabled = v
+end)
+NameSection:Dropdown("Display", { "UserName", "DisplayName" }, 1, function(_, text)
+    BeastSettings.NameDisplay = text
+end)
+NameSection:ColorPicker("Color", BeastSettings.NameColor, function(c)
+    BeastSettings.NameColor = c
+end)
+NameSection:SliderInt("Size", 10, 24, BeastSettings.NameSize, function(v)
+    BeastSettings.NameSize = v
+end)
+
+local BeastCharmSection = BeastTab:Section("Charm")
+BeastCharmSection:Toggle("Enabled", BeastSettings.CharmEnabled, function(v)
+    BeastSettings.CharmEnabled = v
+end)
+BeastCharmSection:ColorPicker("Fill Color", BeastSettings.CharmFill, function(c)
+    BeastSettings.CharmFill = c
+end)
+BeastCharmSection:ColorPicker("Outline Color", BeastSettings.CharmOutline, function(c)
+    BeastSettings.CharmOutline = c
+end)
+BeastCharmSection:SliderInt("Fill Transparency", 0, 100, BeastSettings.CharmFillT, function(v)
+    BeastSettings.CharmFillT = v
+end)
+
+-- ===================== EXIT DOOR TAB UI =====================
+local DoorBoxSection = DoorTab:Section("Box")
+DoorBoxSection:Toggle("Enabled", DoorSettings.BoxEnabled, function(v)
+    DoorSettings.BoxEnabled = v
+end)
+DoorBoxSection:Dropdown("Style", { "Square", "Corner" }, 1, function(_, text)
+    DoorSettings.BoxStyle = text
+end)
+DoorBoxSection:ColorPicker("Color", DoorSettings.BoxColor, function(c)
+    DoorSettings.BoxColor = c
+end)
+DoorBoxSection:SliderInt("Thickness", 1, 5, DoorSettings.BoxThickness, function(v)
+    DoorSettings.BoxThickness = v
+end)
+
+local DoorNameSection = DoorTab:Section("Name")
+DoorNameSection:Toggle("Enabled", DoorSettings.NameEnabled, function(v)
+    DoorSettings.NameEnabled = v
+end)
+DoorNameSection:ColorPicker("Color", DoorSettings.NameColor, function(c)
+    DoorSettings.NameColor = c
+end)
+DoorNameSection:SliderInt("Size", 10, 24, DoorSettings.NameSize, function(v)
+    DoorSettings.NameSize = v
+end)
+
+local DoorAvailSection = DoorTab:Section("Availability")
+DoorAvailSection:Toggle("Check if Available", DoorSettings.CheckAvailable, function(v)
+    DoorSettings.CheckAvailable = v
+end)
+
+local DoorCharmSection = DoorTab:Section("Charm")
+DoorCharmSection:Toggle("Enabled", DoorSettings.CharmEnabled, function(v)
+    DoorSettings.CharmEnabled = v
+end)
+DoorCharmSection:ColorPicker("Fill Color", DoorSettings.CharmFill, function(c)
+    DoorSettings.CharmFill = c
+end)
+DoorCharmSection:ColorPicker("Outline Color", DoorSettings.CharmOutline, function(c)
+    DoorSettings.CharmOutline = c
+end)
+DoorCharmSection:SliderInt("Fill Transparency", 0, 100, DoorSettings.CharmFillT, function(v)
+    DoorSettings.CharmFillT = v
+end)
+
+-- ===================== COMPUTER TAB UI =====================
+local CompBoxSection = ComputerTab:Section("Box")
+CompBoxSection:Toggle("Enabled", ComputerSettings.BoxEnabled, function(v)
+    ComputerSettings.BoxEnabled = v
+end)
+CompBoxSection:Dropdown("Style", { "Square", "Corner" }, 1, function(_, text)
+    ComputerSettings.BoxStyle = text
+end)
+CompBoxSection:ColorPicker("Color", ComputerSettings.BoxColor, function(c)
+    ComputerSettings.BoxColor = c
+end)
+CompBoxSection:SliderInt("Thickness", 1, 5, ComputerSettings.BoxThickness, function(v)
+    ComputerSettings.BoxThickness = v
+end)
+
+local CompNameSection = ComputerTab:Section("Name")
+CompNameSection:Toggle("Enabled", ComputerSettings.NameEnabled, function(v)
+    ComputerSettings.NameEnabled = v
+end)
+CompNameSection:ColorPicker("Color", ComputerSettings.NameColor, function(c)
+    ComputerSettings.NameColor = c
+end)
+CompNameSection:SliderInt("Size", 10, 24, ComputerSettings.NameSize, function(v)
+    ComputerSettings.NameSize = v
+end)
+
+local CompStatusSection = ComputerTab:Section("Completion")
+CompStatusSection:Toggle("Check if Completed", ComputerSettings.CheckCompleted, function(v)
+    ComputerSettings.CheckCompleted = v
+end)
+
+local CompCharmSection = ComputerTab:Section("Charm")
+CompCharmSection:Toggle("Enabled", ComputerSettings.CharmEnabled, function(v)
+    ComputerSettings.CharmEnabled = v
+end)
+CompCharmSection:ColorPicker("Fill Color", ComputerSettings.CharmFill, function(c)
+    ComputerSettings.CharmFill = c
+end)
+CompCharmSection:ColorPicker("Outline Color", ComputerSettings.CharmOutline, function(c)
+    ComputerSettings.CharmOutline = c
+end)
+CompCharmSection:SliderInt("Fill Transparency", 0, 100, ComputerSettings.CharmFillT, function(v)
+    ComputerSettings.CharmFillT = v
+end)
+
+-- ===================== OPTIMISATION : cache des propriétés =====================
+-- Écrire une propriété Drawing / Instance coûte cher. On garde la dernière
+-- valeur écrite et on ne réécrit que si elle a changé.
+local Shadow = {}
+local function Set(d, k, v)
+    local sh = Shadow[d]
+    if not sh then
+        sh = {}
+        Shadow[d] = sh
+    end
+    if sh[k] ~= v then
+        sh[k] = v
+        d[k] = v
+    end
+end
+
+-- ===================== ESP HELPERS =====================
+local function NewESPObj()
+    local obj = {}
+    obj.Lines = {}
+    for i = 1, 8 do
+        local l = NewDrawing("Line")
+        l.Visible   = false
+        l.Thickness = 2
+        obj.Lines[i] = l
+    end
+    obj.HBarBg           = NewDrawing("Line")
+    obj.HBarBg.Visible   = false
+    obj.HBarBg.Thickness = 4
+    obj.HBarBg.Color     = Color3.fromRGB(40, 40, 40)
+    obj.HBarFg           = NewDrawing("Line")
+    obj.HBarFg.Visible   = false
+    obj.HBarFg.Thickness = 4
+    obj.Tracer           = NewDrawing("Line")
+    obj.Tracer.Visible   = false
+
+    -- Texte en 3 morceaux : "NOM [ " + "STATUT" + " ]"
+    obj.NameLabel          = NewDrawing("Text")
+    obj.NameLabel.Visible  = false
+    obj.NameLabel.Center   = false
+    obj.NameLabel.Outline  = true
+    obj.AvailLabel         = NewDrawing("Text")
+    obj.AvailLabel.Visible = false
+    obj.AvailLabel.Center  = false
+    obj.AvailLabel.Outline = true
+    obj.EndLabel           = NewDrawing("Text")
+    obj.EndLabel.Visible   = false
+    obj.EndLabel.Center    = false
+    obj.EndLabel.Outline   = true
+    return obj
+end
+
+local function HideObj(obj)
+    if not obj then return end
+    for _, l in ipairs(obj.Lines) do Set(l, "Visible", false) end
+    Set(obj.HBarBg, "Visible", false)
+    Set(obj.HBarFg, "Visible", false)
+    Set(obj.Tracer, "Visible", false)
+    Set(obj.NameLabel, "Visible", false)
+    Set(obj.AvailLabel, "Visible", false)
+    Set(obj.EndLabel, "Visible", false)
+    if obj._hl then Set(obj._hl, "Enabled", false) end
+end
+
+local function RemoveDrawing(d)
+    Shadow[d] = nil
+    pcall(function() d:Remove() end)
+end
+
+-- Supprime vraiment les dessins d'un objet (quand le model a disparu)
+local function DestroyObj(obj)
+    if not obj then return end
+    for _, l in ipairs(obj.Lines) do RemoveDrawing(l) end
+    RemoveDrawing(obj.HBarBg)
+    RemoveDrawing(obj.HBarFg)
+    RemoveDrawing(obj.Tracer)
+    RemoveDrawing(obj.NameLabel)
+    RemoveDrawing(obj.AvailLabel)
+    RemoveDrawing(obj.EndLabel)
+    if obj._hl then
+        Shadow[obj._hl] = nil
+        pcall(function() obj._hl:Destroy() end)
+        obj._hl = nil
+    end
+end
+
+-- ===================== CHARM (Highlight) =====================
+-- Lumen exige un parent vivant dans Instance.new : on essaie plusieurs parents.
+-- Si aucun ne marche, le Charm est désactivé (l'ESP, lui, continue de marcher).
+local HLBroken = false
+
+local function CreateHighlight()
+    if HLBroken then return nil end
+
+    local candidates = {}
+    pcall(function()
+        if gethui then candidates[#candidates + 1] = gethui() end
+    end)
+    pcall(function()
+        candidates[#candidates + 1] = game:GetService("CoreGui")
+    end)
+    candidates[#candidates + 1] = workspace
+
+    local lastErr
+    for _, parent in ipairs(candidates) do
+        if parent then
+            local ok, res = pcall(function()
+                return Instance.new("Highlight", parent)
+            end)
+            if ok and res then
+                pcall(function() res.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
+                pcall(function() res.OutlineTransparency = 0 end)
+                return res
+            end
+            lastErr = res
+        end
+    end
+
+    HLBroken = true
+    Report("Charm indisponible", lastErr)
+    return nil
+end
+
+local function UpdateCharm(obj, adornee, enabled, fill, outline, fillT)
+    local hl = obj._hl
+    if not enabled or not adornee or not adornee.Parent then
+        if hl then Set(hl, "Enabled", false) end
+        return
+    end
+
+    if not hl then
+        hl = CreateHighlight()
+        if not hl then return end
+        obj._hl = hl
+        table.insert(Env._FleeESP_Highlights, hl)
+    end
+
+    Set(hl, "Adornee", adornee)
+    Set(hl, "FillColor", fill)
+    Set(hl, "OutlineColor", outline)
+    Set(hl, "FillTransparency", math.clamp(fillT / 100, 0, 1))
+    Set(hl, "Enabled", true)
+end
+
+-- Une erreur de Charm ne doit JAMAIS empêcher le reste de l'ESP de s'afficher
+local function SafeCharm(...)
+    local ok, err = pcall(UpdateCharm, ...)
+    if not ok then Report("Charm", err) end
+end
+
+-- ===================== BOX 2D =====================
+local function BBFromValues(cx, top, bot, w)
+    return {
+        TL = Vector2.new(cx - w / 2, top),
+        TR = Vector2.new(cx + w / 2, top),
+        BL = Vector2.new(cx - w / 2, bot),
+        BR = Vector2.new(cx + w / 2, bot),
+        W = w, H = bot - top, CX = cx,
+        TopY = top, BotY = bot,
+    }
+end
+
+-- Pas de lissage : la box suit exactement l'objet (sinon elle traîne quand
+-- tu bouges la caméra). Seul un arrondi au pixel est appliqué : ça supprime
+-- les tremblements d'objets immobiles sans aucun retard.
+local function BuildBB(cam, pos, halfH, halfW)
+    local topS = cam:WorldToViewportPoint(pos + Vector3.new(0, halfH, 0))
+    local botS = cam:WorldToViewportPoint(pos - Vector3.new(0, halfH, 0))
+
+    -- les DEUX points doivent être devant la caméra (sinon coordonnées folles)
+    if topS.Z <= 0 or botS.Z <= 0 then return nil end
+
+    local vp  = cam.ViewportSize
+    local top = math.min(topS.Y, botS.Y)
+    local bot = math.max(topS.Y, botS.Y)
+    local h   = bot - top
+    local w   = h * (halfW / halfH)
+    local cx  = topS.X
+
+    -- complètement hors écran, ou beaucoup trop grand (objet collé à la caméra)
+    if cx + w / 2 < -50 or cx - w / 2 > vp.X + 50 then return nil end
+    if bot < -50 or top > vp.Y + 50 then return nil end
+    if h > vp.Y * 3 then return nil end
+
+    return BBFromValues(
+        math.floor(cx + 0.5),
+        math.floor(top + 0.5),
+        math.floor(bot + 0.5),
+        math.floor(w / 2 + 0.5) * 2
+    )
+end
+
+local function SetLine(l, from, to, color, thick)
+    Set(l, "From", from)
+    Set(l, "To", to)
+    Set(l, "Color", color)
+    Set(l, "Thickness", thick)
+    Set(l, "Visible", true)
+end
+
+local function DrawSquare(obj, bb, color, thick)
+    local L = obj.Lines
+    for i = 5, 8 do Set(L[i], "Visible", false) end
+    SetLine(L[1], bb.TL, bb.TR, color, thick)
+    SetLine(L[2], bb.BL, bb.BR, color, thick)
+    SetLine(L[3], bb.TL, bb.BL, color, thick)
+    SetLine(L[4], bb.TR, bb.BR, color, thick)
+end
+
+local function DrawCorner(obj, bb, color, thick)
+    local L  = obj.Lines
+    local lx = math.floor(bb.W * 0.25 + 0.5)
+    local ly = math.floor(bb.H * 0.25 + 0.5)
+    SetLine(L[1], bb.TL, Vector2.new(bb.TL.X + lx, bb.TL.Y), color, thick)
+    SetLine(L[2], bb.TL, Vector2.new(bb.TL.X, bb.TL.Y + ly), color, thick)
+    SetLine(L[3], bb.TR, Vector2.new(bb.TR.X - lx, bb.TR.Y), color, thick)
+    SetLine(L[4], bb.TR, Vector2.new(bb.TR.X, bb.TR.Y + ly), color, thick)
+    SetLine(L[5], bb.BL, Vector2.new(bb.BL.X + lx, bb.BL.Y), color, thick)
+    SetLine(L[6], bb.BL, Vector2.new(bb.BL.X, bb.BL.Y - ly), color, thick)
+    SetLine(L[7], bb.BR, Vector2.new(bb.BR.X - lx, bb.BR.Y), color, thick)
+    SetLine(L[8], bb.BR, Vector2.new(bb.BR.X, bb.BR.Y - ly), color, thick)
+end
+
+local function DrawBox(obj, bb, style, color, thick)
+    if style == "Corner" then
+        DrawCorner(obj, bb, color, thick)
+    else
+        DrawSquare(obj, bb, color, thick)
+    end
+end
+
+local function HideBox(obj)
+    for _, l in ipairs(obj.Lines) do Set(l, "Visible", false) end
+end
+
+local function HealthColor(ratio)
+    if ratio >= 0.5 then
+        return Color3.fromRGB(math.floor((1 - ratio) * 2 * 255), 255, 0)
+    else
+        return Color3.fromRGB(255, math.floor(ratio * 2 * 255), 0)
+    end
+end
+
+local function DrawHealthBar(obj, bb, ratio, healthBased, fixedColor)
+    local x = bb.TL.X - 6
+    Set(obj.HBarBg, "From", Vector2.new(x, bb.TopY))
+    Set(obj.HBarBg, "To", Vector2.new(x, bb.BotY))
+    Set(obj.HBarBg, "Visible", true)
+    local fillY = math.floor(bb.BotY - bb.H * ratio + 0.5)
+    Set(obj.HBarFg, "From", Vector2.new(x, fillY))
+    Set(obj.HBarFg, "To", Vector2.new(x, bb.BotY))
+    Set(obj.HBarFg, "Color", healthBased and HealthColor(ratio) or fixedColor)
+    Set(obj.HBarFg, "Visible", true)
+end
+
+local function DrawTracer(cam, obj, bb, origin, color, thick)
+    local vp = cam.ViewportSize
+    local from
+    if origin == "Top" then
+        from = Vector2.new(vp.X / 2, 0)
+    elseif origin == "Mouse" then
+        local mp = UserInputService:GetMouseLocation()
+        from = Vector2.new(mp.X, mp.Y)
+    else
+        from = Vector2.new(vp.X / 2, vp.Y)
+    end
+    Set(obj.Tracer, "From", from)
+    Set(obj.Tracer, "To", Vector2.new(bb.CX, bb.BotY))
+    Set(obj.Tracer, "Color", color)
+    Set(obj.Tracer, "Thickness", thick)
+    Set(obj.Tracer, "Visible", true)
+end
+
+-- ===================== TEXTE =====================
+-- Largeur mesurée une seule fois par (texte, taille), puis mise en cache
+local WidthCache = {}
+local function MeasureText(label, text, size)
+    local key = size .. "|" .. text
+    local w = WidthCache[key]
+    if w then return w end
+    local tb
+    pcall(function() tb = label.TextBounds.X end)
+    if tb and tb > 0 then
+        WidthCache[key] = tb
+        return tb
+    end
+    return #text * size * 0.55   -- estimation (non mise en cache, on réessaie)
+end
+
+-- Affiche "NOM [ STATUT ]" centré, statut coloré (vert / rouge)
+-- status : true = vert, false = rouge, nil = pas de statut (affiche juste le nom)
+local function DrawStatusLine(obj, bb, name, statusTrue, statusFalse, status, nameColor, size)
+    local y = bb.TopY - size - 2
+    local nl, al, el = obj.NameLabel, obj.AvailLabel, obj.EndLabel
+
+    Set(nl, "Size", size)
+    Set(nl, "Color", nameColor)
+    Set(al, "Size", size)
+    Set(el, "Size", size)
+    Set(el, "Color", nameColor)
+
+    if status == nil then
+        Set(nl, "Text", name)
+        local w = MeasureText(nl, name, size)
+        Set(nl, "Position", Vector2.new(math.floor(bb.CX - w / 2 + 0.5), y))
+        Set(nl, "Visible", true)
+        Set(al, "Visible", false)
+        Set(el, "Visible", false)
+        return
+    end
+
+    local t1 = name .. " [ "
+    local t2 = status and statusTrue or statusFalse
+    local t3 = " ]"
+    Set(nl, "Text", t1)
+    Set(al, "Text", t2)
+    Set(al, "Color", status and GREEN or RED)
+    Set(el, "Text", t3)
+
+    local w1 = math.floor(MeasureText(nl, t1, size) + 0.5)
+    local w2 = math.floor(MeasureText(al, t2, size) + 0.5)
+    local w3 = math.floor(MeasureText(el, t3, size) + 0.5)
+    local x  = math.floor(bb.CX - (w1 + w2 + w3) / 2 + 0.5)
+
+    Set(nl, "Position", Vector2.new(x, y))
+    Set(al, "Position", Vector2.new(x + w1, y))
+    Set(el, "Position", Vector2.new(x + w1 + w2, y))
+    Set(nl, "Visible", true)
+    Set(al, "Visible", true)
+    Set(el, "Visible", true)
+end
+
+local function HideTexts(obj)
+    Set(obj.NameLabel, "Visible", false)
+    Set(obj.AvailLabel, "Visible", false)
+    Set(obj.EndLabel, "Visible", false)
+end
+
+-- ===================== BEAST ESP =====================
+local BeastESP = {}
+
+local function GetOrCreateBeast(player)
+    local obj = BeastESP[player]
+    if not obj then
+        obj = NewESPObj()
+        BeastESP[player] = obj
+    end
+    return obj
+end
+
+local function UpdateBeastPlayer(player, cam, refPos, now)
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local has  = char ~= nil and char:FindFirstChild(BeastSettings.TargetName) ~= nil
+
+    local obj
+    if has then
+        obj = GetOrCreateBeast(player)
+        obj._hammerT = now
+    else
+        obj = BeastESP[player]
+        if not obj then return end      -- jamais été le Beast : rien à faire
+    end
+
+    -- le marteau doit être absent 0.6 s avant que l'ESP disparaisse
+    local recent = obj._hammerT ~= nil and (now - obj._hammerT) < 0.6
+    if not (root and (has or recent)) then
+        HideObj(obj)
+        return
+    end
+
+    if (root.Position - refPos).Magnitude > BeastSettings.MaxDist then
+        HideObj(obj)
+        return
+    end
+
+    local bb = BuildBB(cam, root.Position, 3, 1.5)
+    if not bb then
+        HideObj(obj)
+        return
+    end
+
+    -- Charm
+    SafeCharm(obj, char, BeastSettings.CharmEnabled, BeastSettings.CharmFill,
+        BeastSettings.CharmOutline, BeastSettings.CharmFillT)
+
+    -- Box
+    if BeastSettings.BoxEnabled then
+        DrawBox(obj, bb, BeastSettings.BoxStyle, BeastSettings.BoxColor, BeastSettings.BoxThickness)
+    else
+        HideBox(obj)
+    end
+
+    -- Health
+    if BeastSettings.HealthEnabled then
+        local hum   = char:FindFirstChildOfClass("Humanoid")
+        local ratio = 1
+        if hum and hum.MaxHealth > 0 then
+            ratio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+        end
+        DrawHealthBar(obj, bb, ratio, BeastSettings.HealthBased, BeastSettings.BoxColor)
+    else
+        Set(obj.HBarBg, "Visible", false)
+        Set(obj.HBarFg, "Visible", false)
+    end
+
+    -- Tracer
+    if BeastSettings.TracerEnabled then
+        DrawTracer(cam, obj, bb, BeastSettings.TracerOrigin, BeastSettings.TracerColor, BeastSettings.TracerThick)
+    else
+        Set(obj.Tracer, "Visible", false)
+    end
+
+    -- Name
+    if BeastSettings.NameEnabled then
+        local name = BeastSettings.NameDisplay == "DisplayName" and player.DisplayName or player.Name
+        DrawStatusLine(obj, bb, name, "", "", nil, BeastSettings.NameColor, BeastSettings.NameSize)
+    else
+        HideTexts(obj)
+    end
+end
+
+-- ===================== TRACKER (portes / ordinateurs) =====================
+-- Scan complet du workspace : c'est LE point lourd, donc rare (voir boucle).
+-- Si les models disparaissent, les ESP sont supprimés et le tracker attend
+-- simplement qu'ils reviennent.
+local ForceScan = false   -- mis à true quand un model disparaît
+
+local function MakeTracker(label, names)
+    local set = {}
+    for _, n in ipairs(names) do set[n] = true end
+
+    local tracker = { list = {}, map = {}, lastCount = -1 }
+
+    local function matches(obj)
+        if not set[obj.Name] then return false end
+        if not (obj:IsA("Model") or obj:IsA("BasePart")) then return false end
+        -- ignore un enfant qui a le même nom que son parent
+        if obj.Parent and set[obj.Parent.Name] then return false end
+        return true
+    end
+
+    function tracker.add(obj)
+        if tracker.map[obj] then return end
+        if not matches(obj) then return end
+        local entry = { model = obj, obj = NewESPObj() }
+        tracker.map[obj] = entry
+        tracker.list[#tracker.list + 1] = entry
+    end
+
+    function tracker.prune()
+        local newList = {}
+        for _, entry in ipairs(tracker.list) do
+            local m = entry.model
+            local alive = false
+            pcall(function()
+                alive = m ~= nil and m.Parent ~= nil and m:IsDescendantOf(workspace)
+            end)
+            if alive then
+                newList[#newList + 1] = entry
+            else
+                tracker.map[m] = nil
+                DestroyObj(entry.obj)
+            end
+        end
+        tracker.list = newList
+    end
+
+    function tracker.scan()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            tracker.add(obj)
+        end
+        tracker.prune()
+
+        local n = #tracker.list
+        if n ~= tracker.lastCount then
+            tracker.lastCount = n
+            print("[Flee ESP] " .. label .. " trouvés : " .. n)
+        end
+    end
+
+    function tracker.hideAll()
+        for _, entry in ipairs(tracker.list) do HideObj(entry.obj) end
+    end
+
+    return tracker
+end
+
+local DoorTracker     = MakeTracker("Exit Door", ExitDoorNames)
+local ComputerTracker = MakeTracker("Computer", ComputerNames)
+
+-- ===================== CENTRE D'UN MODEL =====================
+-- Lumen n'a pas Model:GetPivot : on détecte une fois ce qui est supporté,
+-- sinon on prend le centre de TOUTES les parts (mis en cache 0.5 s).
+local NativePivot = nil     -- nil = pas encore testé
+local NativeBBox  = nil
+local PivotCache  = {}
+
+local function PartsCenter(model, now)
+    local c = PivotCache[model]
+    if c and c.pos and now - c.t < 0.5 then return c.pos end
+
+    local minX, minY, minZ, maxX, maxY, maxZ
+    for _, d in ipairs(model:GetDescendants()) do
+        if d:IsA("BasePart") then
+            local p = d.Position
+            minX = minX and math.min(minX, p.X) or p.X
+            minY = minY and math.min(minY, p.Y) or p.Y
+            minZ = minZ and math.min(minZ, p.Z) or p.Z
+            maxX = maxX and math.max(maxX, p.X) or p.X
+            maxY = maxY and math.max(maxY, p.Y) or p.Y
+            maxZ = maxZ and math.max(maxZ, p.Z) or p.Z
+        end
+    end
+
+    local pos = nil
+    if minX then
+        pos = Vector3.new((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2)
+    end
+    -- décale les recalculs de chaque model pour éviter un pic sur une seule frame
+    PivotCache[model] = { pos = pos, t = now - math.random() * 0.4 }
+    return pos
+end
+
+local function GetPivot(model, now)
+    if model:IsA("BasePart") then
+        return model.Position
+    end
+    if not model:IsA("Model") then
+        return nil
+    end
+
+    -- appels directs une fois qu'on sait que la méthode existe (pas de closure)
+    if NativePivot == true then
+        return model:GetPivot().Position
+    elseif NativePivot == nil then
+        local ok, cf = pcall(function() return model:GetPivot() end)
+        if ok and cf then
+            NativePivot = true
+            return cf.Position
+        end
+        if not ok then NativePivot = false end
+    end
+
+    if NativeBBox == true then
+        return model:GetBoundingBox().Position
+    elseif NativeBBox == nil then
+        local ok, cf = pcall(function() return model:GetBoundingBox() end)
+        if ok and cf then
+            NativeBBox = true
+            return cf.Position
+        end
+        if not ok then NativeBBox = false end
+    end
+
+    return PartsCenter(model, now)
+end
+
+local function GetColorOf(inst)
+    if not inst then return nil end
+    if inst:IsA("BasePart") or inst:IsA("Light") then
+        return inst.Color
+    end
+    -- si c'est un Model, prend la première part trouvée dedans
+    local part = inst:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Color or nil
+end
+
+-- Anti-scintillement : un statut ne change que s'il reste stable 0.3 s
+local STATUS_DELAY = 0.3
+local function Debounce(entry, value, now)
+    local code = (value == nil and 0) or (value and 1 or 2)
+    local st   = entry._st
+    if not st then
+        entry._st = { cur = code, pend = code, since = now }
+        st = entry._st
+    elseif code == st.cur then
+        st.pend = code
+    elseif st.pend ~= code then
+        st.pend  = code
+        st.since = now
+    elseif now - st.since >= STATUS_DELAY then
+        st.cur = code
+    end
+    if st.cur == 0 then return nil end
+    return st.cur == 1
+end
+
+-- La couleur est relue seulement toutes les 0.15 s (inutile à chaque frame)
+local function GetStatus(entry, now, fn, model)
+    if not entry._stT or now - entry._stT >= 0.15 then
+        entry._stT = now
+        entry._raw = fn(model)
+    end
+    return Debounce(entry, entry._raw, now)
+end
+
+-- ===================== EXIT DOOR ESP =====================
+local function IsRedColor(c)
+    return c.R > 0.55 and c.G < 0.35 and c.B < 0.35
+end
+
+local function GetDoorAvailability(model)
+    local light = model:FindFirstChild(LightName) or model:FindFirstChild(LightName, true)
+    if not light then return nil end
+    local ok, color = pcall(GetColorOf, light)
+    if not ok or not color then return nil end
+    return not IsRedColor(color)
+end
+
+local function UpdateDoor(entry, cam, refPos, now)
+    local model = entry.model
+    local obj   = entry.obj
+
+    if not model or not model.Parent then
+        ForceScan = true
+        HideObj(obj)
+        return
+    end
+
+    local pivot = GetPivot(model, now)
+    if not pivot or (pivot - refPos).Magnitude > DoorSettings.MaxDist then
+        HideObj(obj)
+        return
+    end
+
+    local bb = BuildBB(cam, pivot, 4, 2.5)
+    if not bb then
+        HideObj(obj)
+        return
+    end
+
+    -- Charm
+    SafeCharm(obj, model, DoorSettings.CharmEnabled, DoorSettings.CharmFill,
+        DoorSettings.CharmOutline, DoorSettings.CharmFillT)
+
+    if DoorSettings.BoxEnabled then
+        DrawBox(obj, bb, DoorSettings.BoxStyle, DoorSettings.BoxColor, DoorSettings.BoxThickness)
+    else
+        HideBox(obj)
+    end
+
+    if DoorSettings.NameEnabled then
+        local status = nil
+        if DoorSettings.CheckAvailable then
+            status = GetStatus(entry, now, GetDoorAvailability, model)
+        end
+        DrawStatusLine(obj, bb, "EXIT DOOR", "AVAILABLE", "NOT AVAILABLE",
+            status, DoorSettings.NameColor, DoorSettings.NameSize)
+    else
+        HideTexts(obj)
+    end
+end
+
+-- ===================== COMPUTER ESP =====================
+-- Rouge (même un peu foncé / orangé) = NOT COMPLETED
+local function IsRedLoose(c)
+    return c.R > 0.45 and c.R > c.G + 0.25 and c.R > c.B + 0.25
+end
+
+local function GetComputerCompleted(model)
+    -- Screen est un enfant de ComputerTable (si pas encore chargé :
+    -- on affiche juste "COMPUTER")
+    local screen = model:FindFirstChild(ScreenName) or model:FindFirstChild(ScreenName, true)
+    if not screen then return nil end
+    local ok, color = pcall(GetColorOf, screen)
+    if not ok or not color then return nil end
+    -- écran rouge = NOT COMPLETED, toute autre couleur = COMPLETED
+    return not IsRedLoose(color)
+end
+
+local function UpdateComputer(entry, cam, refPos, now)
+    local model = entry.model
+    local obj   = entry.obj
+
+    if not model or not model.Parent then
+        ForceScan = true
+        HideObj(obj)
+        return
+    end
+
+    local pivot = GetPivot(model, now)
+    if not pivot or (pivot - refPos).Magnitude > ComputerSettings.MaxDist then
+        HideObj(obj)
+        return
+    end
+
+    local bb = BuildBB(cam, pivot, 2, 2)
+    if not bb then
+        HideObj(obj)
+        return
+    end
+
+    -- Charm
+    SafeCharm(obj, model, ComputerSettings.CharmEnabled, ComputerSettings.CharmFill,
+        ComputerSettings.CharmOutline, ComputerSettings.CharmFillT)
+
+    if ComputerSettings.BoxEnabled then
+        DrawBox(obj, bb, ComputerSettings.BoxStyle, ComputerSettings.BoxColor, ComputerSettings.BoxThickness)
+    else
+        HideBox(obj)
+    end
+
+    if ComputerSettings.NameEnabled then
+        local status = nil
+        if ComputerSettings.CheckCompleted then
+            status = GetStatus(entry, now, GetComputerCompleted, model)
+        end
+        DrawStatusLine(obj, bb, "COMPUTER", "COMPLETED", "NOT COMPLETED",
+            status, ComputerSettings.NameColor, ComputerSettings.NameSize)
+    else
+        HideTexts(obj)
+    end
+end
+
+-- ===================== BOUCLE PRINCIPALE =====================
+local function HideAll()
+    for _, obj in pairs(BeastESP) do HideObj(obj) end
+    DoorTracker.hideAll()
+    ComputerTracker.hideAll()
+end
+
+local function ScanAll()
+    Safe("Scan Exit Door", DoorTracker.scan)
+    Safe("Scan Computer", ComputerTracker.scan)
+end
+
+ScanAll()
+
+local lastScan = os.clock()
+local frameConn
+
+local function Frame()
+    local now = os.clock()
+
+    -- Scan du workspace (lourd) : 3 s si il manque des models, 6 s sinon,
+    -- et au plus tôt 1 s après la disparition d'un model.
+    local interval = 6
+    if #DoorTracker.list == 0 or #ComputerTracker.list == 0 then interval = 3 end
+    if ForceScan then interval = 1 end
+    if now - lastScan >= interval then
+        lastScan  = now
+        ForceScan = false
+        ScanAll()
+    end
+
+    local cam = workspace.CurrentCamera
+    if not cam then
+        HideAll()
+        return
+    end
+
+    -- Position de référence : ton perso, sinon la caméra (lobby / pas de perso)
+    local refPos = cam.CFrame.Position
+    local myChar = LocalPlayer and LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if myRoot then refPos = myRoot.Position end
+
+    -- ---- BEAST ESP ----
+    local B = BeastSettings
+    if B.BoxEnabled or B.HealthEnabled or B.TracerEnabled or B.NameEnabled or B.CharmEnabled then
+        local plrs = Players:GetPlayers()
+        for i = 1, #plrs do
+            local player = plrs[i]
+            if player ~= LocalPlayer then
+                local ok = Safe("Beast ESP", UpdateBeastPlayer, player, cam, refPos, now)
+                if not ok then
+                    pcall(HideObj, BeastESP[player])
+                end
+            end
+        end
+    else
+        for _, obj in pairs(BeastESP) do HideObj(obj) end
+    end
+
+    -- ---- EXIT DOOR ESP ----
+    local D = DoorSettings
+    if D.BoxEnabled or D.NameEnabled or D.CharmEnabled then
+        for _, entry in ipairs(DoorTracker.list) do
+            local ok = Safe("Exit Door ESP", UpdateDoor, entry, cam, refPos, now)
+            if not ok then
+                pcall(HideObj, entry.obj)
+            end
+        end
+    else
+        DoorTracker.hideAll()
+    end
+
+    -- ---- COMPUTER ESP ----
+    local C = ComputerSettings
+    if C.BoxEnabled or C.NameEnabled or C.CharmEnabled then
+        for _, entry in ipairs(ComputerTracker.list) do
+            local ok = Safe("Computer ESP", UpdateComputer, entry, cam, refPos, now)
+            if not ok then
+                pcall(HideObj, entry.obj)
+            end
+        end
+    else
+        ComputerTracker.hideAll()
+    end
+end
+
+local function OnFrame()
+    -- Une nouvelle exécution du script a pris le relais : on s'arrête
+    if Env._FleeESP_Id ~= MyId then
+        HideAll()
+        if frameConn then frameConn:Disconnect() end
+        return
+    end
+    local ok, err = pcall(Frame)
+    if not ok then Report("Frame", err) end
+end
+
+-- On se branche JUSTE APRÈS la caméra de Roblox : la caméra est déjà à jour
+-- quand on projette les positions, donc aucun décalage quand tu bouges la tête.
+-- Si BindToRenderStep n'existe pas dans ton exécuteur, on utilise RenderStepped.
+do
+    local stepName = "FleeESP_" .. tostring(MyId)
+    local bound = pcall(function()
+        RunService:BindToRenderStep(stepName, Enum.RenderPriority.Camera.Value + 1, OnFrame)
+    end)
+    if bound then
+        frameConn = {
+            Disconnect = function()
+                pcall(function() RunService:UnbindFromRenderStep(stepName) end)
+            end,
+        }
+    else
+        frameConn = RunService.RenderStepped:Connect(OnFrame)
+    end
+    table.insert(Env._FleeESP_Conns, frameConn)
+end
+
+local removingConn = Players.PlayerRemoving:Connect(function(player)
+    local obj = BeastESP[player]
+    if obj then pcall(DestroyObj, obj) end
+    BeastESP[player] = nil
+end)
+table.insert(Env._FleeESP_Conns, removingConn)
+
+print("[Flee ESP] Loaded — Beast ESP + Exit Door ESP + Computer ESP")
